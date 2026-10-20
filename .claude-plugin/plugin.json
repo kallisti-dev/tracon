@@ -1,0 +1,10 @@
+{
+  "name": "tracon",
+  "version": "0.1.0",
+  "description": "State hooks for tracon, which tells you which of your terminal coding agents need you and takes you there",
+  "author": { "name": "Adam Curtis" },
+  "homepage": "https://github.com/kallisti-dev/tracon",
+  "repository": "https://github.com/kallisti-dev/tracon",
+  "license": "BSD-3-Clause",
+  "keywords": ["tmux", "agents", "notifications"]
+}

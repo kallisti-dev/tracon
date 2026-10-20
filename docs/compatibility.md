@@ -1,0 +1,69 @@
+# Compatibility and limitations
+
+## Supported environments
+
+The flake supports Apple Silicon macOS and Linux (`aarch64-darwin`,
+`aarch64-linux` and `x86_64-linux`). tmux 3.2 or newer is required for
+popups; development uses tmux 3.7c. Claude Code is the only harness so far,
+and tmux the only backend.
+
+Home Manager installs the Claude plugin as a personal plugin in Claude Code's
+`skills` directory, which Claude Code 2.1.157 and later load in every
+session. The hooks were checked against Claude Code 2.1.300; earlier versions
+may lack some of the events they use. [Managed settings](https://code.claude.com/docs/en/managed-settings)
+that set `allowManagedHooksOnly` or `disableAllHooks` stop the hooks, and
+tracon then lists Claude panes as `unknown`.
+
+## What Claude Code reports
+
+Observed with Claude Code 2.1.300 on 2026-10-19, logging every hook event
+from a real session in a tmux pane:
+
+| Action | Events |
+| --- | --- |
+| A permission prompt appears | `PreToolUse`, `PermissionRequest`, then `Notification` `permission_prompt` about six seconds later |
+| Approve | `PostToolUse` when the tool finishes, `PostToolBatch`, `Stop` |
+| Reject with "No" | nothing |
+| Reject with a comment | `PostToolBatch`, then `Stop` |
+| Esc at a prompt | nothing |
+| Ctrl-C during a running tool | nothing |
+| AskUserQuestion | `PreToolUse`, `PermissionRequest`, `Notification` `permission_prompt`; after the answer, `PostToolUse`, `PostToolBatch`, `Stop` |
+| ExitPlanMode | `PreToolUse`, `PermissionRequest`, `Notification` `permission_prompt` with "needs your approval for the plan" |
+| A turn ends while a background subagent runs | `Stop` with the subagent in `background_tasks` |
+| That subagent asks permission | `PreToolUse` and `PermissionRequest` with its `agent_id`, then the notification without one |
+| After approving it | the subagent's `PostToolUse`, `PostToolBatch` and `SubagentStop`, then a main-agent `UserPromptSubmit` and `Stop` as Claude takes its result |
+
+No `idle_prompt` notification arrived within 70 seconds of a bare "No".
+tmux's `pane-focus-in` fired on attach, on `select-pane`, and when the
+terminal reported focus.
+
+## Blind spots
+
+- **Interrupts and bare refusals.** Esc, Ctrl-C and "No" without a comment
+  fire no hook, and `Stop` doesn't run after an interrupt. The pane keeps
+  showing `waiting` or `working` until the next prompt or an `idle_prompt`
+  notification; the preview shows the truth. Claude Code does write
+  `[Request interrupted by user for tool use]` to the transcript, which a
+  later version could read.
+- **Approval lag.** Nothing fires when a prompt is approved, so the pane stays
+  `waiting.permission` until the tool finishes.
+- **Sessions started before the plugin loaded** have no hooks and are listed
+  as `unknown` until restarted.
+- **A crashed agent** that never ran SessionEnd leaves its last state on the
+  pane until the pane closes or an agent starts there again.
+- One agent per pane is supported. The pane is found through `$TMUX_PANE`,
+  so an agent inside a nested multiplexer reports to the outer tmux pane.
+
+## Testing limits
+
+The tests run the binary and both plugins against real tmux servers, as
+assembled from the source and as packaged by Nix, with hook payloads in
+place of an agent. Clients attach in control mode, which needs no terminal;
+popups are only checked to open without error. One test runs the real Claude
+Code binary without network access and checks that a session started in a new
+pane reports through the plugin installed as Home Manager installs it, and
+clears its state when it ends. The tests don't cover a real conversation,
+permission prompt or subagent; those were checked by hand as described
+above.
+
+See [troubleshooting](troubleshooting.md) for diagnosing a setup.
