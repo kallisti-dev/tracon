@@ -37,6 +37,11 @@ configuration to register the hook, and set `focus-events on`. tmux only
 reports focus changes from terminals that send focus events; WezTerm and kitty
 do.
 
+If the hook goes missing again after a reload, something in your
+configuration sets `pane-focus-in` without an index, which replaces every
+`pane-focus-in` hook, tracon's included. Give that hook an index, such as
+`set-hook -g 'pane-focus-in[0]' …`, or append it with `set-hook -ga`.
+
 ## Claude Code doesn't load the tracon plugin
 
 Install the `claude-plugin` package where Claude Code loads plugins: with Home

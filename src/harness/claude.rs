@@ -177,14 +177,20 @@ impl Harness for Claude {
                     guarded(update, unless_waiting())
                 }
                 // The input prompt has sat untouched, so any wait or work it
-                // shows is over. A finished turn stays `done` until seen.
+                // shows is over. A finished turn stays `done` until seen, and
+                // background tasks run on while the prompt is idle.
                 Some("idle_prompt") => {
                     let mut update = set(State::IDLE);
                     update.message = Field::Clear;
                     update.agent = Field::Clear;
                     guarded(
                         update,
-                        Cond::negated(Cond::StateUnder(State::known(State::DONE))),
+                        Cond::All(vec![
+                            Cond::negated(Cond::StateUnder(State::known(State::DONE))),
+                            Cond::negated(Cond::StateUnder(State::known(
+                                State::WORKING_BACKGROUND,
+                            ))),
+                        ]),
                     )
                 }
                 _ => None,
@@ -418,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_prompt_ends_waits_but_not_done() {
+    fn idle_prompt_ends_waits_but_not_done_or_background_work() {
         let idle = with(
             event("Notification"),
             json!({ "notification_type": "idle_prompt" }),
@@ -426,8 +432,16 @@ mod tests {
         let waited = replay(&[with(event("PermissionRequest"), bash()), idle.clone()]);
         assert_eq!(state(&waited), "idle");
         assert_eq!(waited.message, None);
-        let finished = replay(&[with(event("Stop"), json!({})), idle]);
+        let finished = replay(&[with(event("Stop"), json!({})), idle.clone()]);
         assert_eq!(state(&finished), "done");
+        let background = replay(&[
+            with(
+                event("Stop"),
+                json!({ "background_tasks": [{ "id": "a", "type": "subagent" }] }),
+            ),
+            idle,
+        ]);
+        assert_eq!(state(&background), "working.background");
     }
 
     #[test]

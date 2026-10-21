@@ -579,6 +579,19 @@ fn focusing_a_finished_pane_marks_it_seen() {
 }
 
 #[test]
+fn a_turn_that_ends_in_view_is_seen() {
+    let mut server = Server::start();
+    let hidden = server.new_window("work");
+    server.attach("work");
+    let finished = event("Stop", json!({ "last_assistant_message": "All done" }));
+    server.hook("%0", finished.clone());
+    server.hook(&hidden, finished);
+    assert_eq!(server.state("%0"), "idle");
+    assert_eq!(server.option("%0", "@tracon_message"), "All done");
+    assert_eq!(server.state(&hidden), "done");
+}
+
+#[test]
 fn setup_is_idempotent_and_reversible() {
     let server = Server::start();
     let foreign = "display-message foreign";
@@ -722,6 +735,28 @@ fn the_picker_lists_previews_and_focuses() {
     server.tmux(&["send-keys", "-t", &picker, "Enter"]);
     wait_until("the client moves", Duration::from_secs(10), || {
         (server.shows(&client) == format!("agents {agent}")).then_some(())
+    });
+}
+
+#[test]
+fn the_picker_fits_a_short_pane() {
+    let server = Server::start();
+    server.hook("%0", event("PermissionRequest", bash(None)));
+    let picker = server.tmux(&[
+        "split-window",
+        "-d",
+        "-l",
+        "6",
+        "-t",
+        "%0",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        &format!("{} pick", server.binary().display()),
+    ]);
+    wait_until("the picker draws", Duration::from_secs(10), || {
+        let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
+        screen.contains("waiting.permission").then_some(())
     });
 }
 

@@ -176,6 +176,18 @@ impl Backend for TmuxBackend {
         Ok(tmux::valid_pane_id(pane).then(|| Locator::tmux(pane)))
     }
 
+    fn in_view(&self, pane: &Locator) -> Result<bool, Error> {
+        let pane = pane_id(pane)?;
+        let output =
+            self.tmux
+                .run(["list-clients", "-F", &joined(&["client_flags", "pane_id"])])?;
+        Ok(output.lines().any(|line| {
+            line.split_once(SEPARATOR).is_some_and(|(flags, shown)| {
+                shown == pane && flags.split(',').any(|flag| flag == "focused")
+            })
+        }))
+    }
+
     fn alive(&self, pane: &Locator) -> Result<bool, Error> {
         let pane = pane_id(pane)?;
         let output = self.tmux.run(["list-panes", "-a", "-F", "#{pane_id}"])?;

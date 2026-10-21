@@ -88,6 +88,8 @@ pub trait Backend {
     fn focus(&self, pane: &Locator, client: Option<&str>) -> Result<(), Error>;
     /// The pane `client` (or the most recently active client) shows.
     fn current(&self, client: Option<&str>) -> Result<Option<Locator>, Error>;
+    /// Whether a client whose terminal has focus shows `pane`.
+    fn in_view(&self, pane: &Locator) -> Result<bool, Error>;
     fn alive(&self, pane: &Locator) -> Result<bool, Error>;
     /// The pane's visible screen.
     fn capture(&self, pane: &Locator) -> Result<String, Error>;

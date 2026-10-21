@@ -134,13 +134,7 @@ fn dispatch(command: Command) -> Result<ExitCode> {
         Command::Pin { pane } => store.set_pinned(&target(&backend, pane)?, true)?,
         Command::Unpin { pane } => store.set_pinned(&target(&backend, pane)?, false)?,
         Command::Seen { pane } => {
-            let mut update = Update::new(State::known(State::IDLE));
-            update.agent = tracon::store::Field::Clear;
-            let seen = Guarded::when(
-                Change::Set(update),
-                Cond::StateUnder(State::known(State::DONE)),
-            );
-            store.apply(&target(&backend, pane)?, &seen, tracon::now())?;
+            store.apply(&target(&backend, pane)?, &seen(), tracon::now())?;
         }
         Command::Pick { client } => {
             let client = client_hint(client);
@@ -194,6 +188,16 @@ fn client_hint(client: Option<String>) -> Option<String> {
         .filter(|client| !client.is_empty())
 }
 
+/// A finished pane becomes idle once seen; any other state is left alone.
+fn seen() -> Guarded {
+    let mut update = Update::new(State::known(State::IDLE));
+    update.agent = tracon::store::Field::Clear;
+    Guarded::when(
+        Change::Set(update),
+        Cond::StateUnder(State::known(State::DONE)),
+    )
+}
+
 fn target(backend: &impl Backend, pane: Option<Locator>) -> Result<Locator> {
     match pane.or_else(|| backend.locate()) {
         Some(pane) => Ok(pane),
@@ -217,7 +221,16 @@ fn hook(name: &str) -> Result<()> {
     let payload: serde_json::Value =
         serde_json::from_str(&input).context("parsing the hook payload")?;
     if let Some(change) = harness.interpret(&payload)? {
-        TmuxStore::default().apply(&pane, &change, tracon::now())?;
+        let store = TmuxStore::default();
+        let now = tracon::now();
+        store.apply(&pane, &change, now)?;
+        // The focus hook only fires on a change of focus, so a turn that
+        // ends in view is seen here.
+        let finishes = matches!(&change.change, Change::Set(update)
+            if update.state.is_under(&State::known(State::DONE)));
+        if finishes && backend.in_view(&pane)? {
+            store.apply(&pane, &seen(), now)?;
+        }
     }
     Ok(())
 }

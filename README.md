@@ -103,7 +103,8 @@ Claude Code distinguishes:
 | `idle` | You have seen the pane, or the session has had no prompt yet |
 | `unknown` | Claude Code runs in the pane, but no hook has reported |
 
-A finished pane becomes `idle` when you focus it. Claude Code reports nothing
+A finished pane becomes `idle` when you focus it, or at once if it finishes
+while you are looking at it. Claude Code reports nothing
 when you interrupt it or answer a prompt with Esc or a bare "No", so such a
 pane shows its last state until your next prompt; the preview shows the
 truth. See [compatibility](docs/compatibility.md) for details.

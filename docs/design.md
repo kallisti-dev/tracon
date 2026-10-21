@@ -71,7 +71,7 @@ events through the tmux store and compare each step with it.
 | `PermissionRequest` | `waiting.question` for those tools, otherwise `waiting.permission` | always |
 | `Elicitation` | `waiting.question` | always |
 | `Notification` `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog` | `waiting.permission` or `waiting.question` | not already waiting |
-| `Notification` `idle_prompt` | `idle` | not `done` |
+| `Notification` `idle_prompt` | `idle` | not `done` or `working.background` |
 | `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PreCompact`, `ElicitationResult` | `working` | see below |
 | `Stop` | `done`, or `working.background` with background tasks | no subagent waits |
 | `StopFailure` | `error`, with the error as message | no subagent waits |
@@ -89,7 +89,9 @@ The permission notification repeats PermissionRequest about six seconds
 later, and also follows AskUserQuestion and ExitPlanMode, so it only raises a
 wait when none is shown; on its own it covers sandboxed network requests,
 which fire nothing else. `idle_prompt` ends a wait or turn that Claude Code
-didn't report ending, but leaves `done` until the pane is seen.
+didn't report ending, but leaves `done` until the pane is seen, and
+`working.background` until Claude takes the tasks' results, since the prompt
+sits idle while they run.
 
 ## Store
 
@@ -132,7 +134,9 @@ than spawning a terminal.
 
 `done` becomes `idle` when the pane gains focus: setup registers a
 `pane-focus-in` hook that runs `tracon seen`. tmux reports focus only with
-`focus-events on`.
+`focus-events on`. That hook doesn't fire for a pane that already has focus,
+so the hook command also marks a finished turn seen when a client whose
+terminal has focus shows the pane.
 
 ## Setup
 

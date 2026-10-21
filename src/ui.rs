@@ -303,8 +303,9 @@ impl Picker<'_> {
 
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let list_height =
-            (self.visible.len() as u16 + 2).clamp(3, area.height.saturating_mul(2) / 5);
+        let list_height = (self.visible.len() as u16 + 2)
+            .min(area.height.saturating_mul(2) / 5)
+            .max(3);
         let [list_area, preview_area, input_area] = Layout::vertical([
             Constraint::Length(list_height),
             Constraint::Min(1),
