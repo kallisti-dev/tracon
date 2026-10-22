@@ -38,7 +38,9 @@ No `idle_prompt` notification arrived within 70 seconds of a bare "No".
 While an approved command ran (checked on 2026-10-22), nothing was written to
 the session transcript and the pane title didn't change; the screen showed a
 spinner line such as `✶ Kerfuffling… (21s · ↓ 109 tokens)`, which the
-permission dialog replaces.
+permission dialog replaces. The dialog is already drawn when the
+`PermissionRequest` hook runs, so a list read straight after that hook
+doesn't see the spinner.
 tmux's `pane-focus-in` fired on attach, on `select-pane`, and when the
 terminal reported focus.
 
