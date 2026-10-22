@@ -93,12 +93,34 @@ didn't report ending, but leaves `done` until the pane is seen, and
 `working.background` until Claude takes the tasks' results, since the prompt
 sits idle while they run.
 
-Nothing fires when a prompt is approved either, so the record stays waiting
-while the approved tool runs. The list reads the screen of each waiting pane
-(`Harness::shows_work`): one showing Claude Code's spinner line, and no
-dialog footer, is listed as `working`. Nothing is written, so the hooks
-remain the only writers, and a screen that doesn't match leaves the pane
-waiting.
+## Screen reading
+
+Some changes fire no hook: Claude Code reports neither an approved prompt
+nor an interrupt, so the record stays `waiting` while an approved tool runs,
+and `waiting` or `working` after Esc, Ctrl-C or a bare "No". The list reads
+the plain-text screen of each pane in one of those states, and its harness
+says what it recognises there (`Harness::read_screen`):
+
+| Sighting | Claude Code shows |
+| --- | --- |
+| `prompt` | a dialog: its footer (`Esc to cancel · Tab to amend`) or options |
+| `working` | the spinner line at the start of a row, such as `✢ Blanching… (6s · ↓ 258 tokens)` |
+| `interrupted` | `⎿  Interrupted · What should Claude do instead?` after the last prompt sent |
+
+A dialog outranks a spinner, and a spinner outranks an older interrupt
+notice. `src/screen.rs` then corrects the listed state, for every harness
+alike:
+
+| Recorded | Sighting | Listed |
+| --- | --- | --- |
+| `waiting` | `working` | `working` |
+| `waiting`, `working` | `interrupted` | `idle` |
+
+Nothing is written, so the hooks remain the only writers. Every correction
+needs a sighting, so a screen the harness doesn't recognise, as after a
+Claude Code update changes its text, leaves the recorded state. `list
+--json` shows each pane's `sighting`. The patterns are tested against real
+screens kept in `tests/screens/`, one directory per Claude Code version.
 
 ## Store
 

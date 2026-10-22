@@ -40,23 +40,27 @@ the session transcript and the pane title didn't change; the screen showed a
 spinner line such as `✶ Kerfuffling… (21s · ↓ 109 tokens)`, which the
 permission dialog replaces. The dialog is already drawn when the
 `PermissionRequest` hook runs, so a list read straight after that hook
-doesn't see the spinner.
+doesn't see the spinner. The spinner starts without its timer, as
+`· Nebulizing…`. Esc or "No" at a prompt, and Esc or Ctrl-C while an
+approved command ran, all left `⎿  Interrupted · What should Claude do
+instead?` above the input box. With vim mode on, the first Esc while Claude
+works only leaves insert mode.
 tmux's `pane-focus-in` fired on attach, on `select-pane`, and when the
 terminal reported focus.
 
 ## Blind spots
 
 - **Interrupts and bare refusals.** Esc, Ctrl-C and "No" without a comment
-  fire no hook, and `Stop` doesn't run after an interrupt. The pane keeps
-  showing `waiting` or `working` until the next prompt or an `idle_prompt`
-  notification; the preview shows the truth. Claude Code does write
-  `[Request interrupted by user for tool use]` to the transcript, which a
-  later version could read.
+  fire no hook, and `Stop` doesn't run after an interrupt, so the record
+  stays `waiting` or `working`. tracon lists the pane as `idle` while
+  Claude Code's interrupt notice is on screen; see
+  [screen reading](design.md#screen-reading).
 - **Approval lag.** Nothing fires when a prompt is approved, so the record
   stays `waiting.permission` until the tool finishes. tracon lists such a pane
   as `working` while its screen shows Claude Code's spinner line and no dialog.
-  If a later Claude Code draws the spinner differently, the pane shows
-  `waiting.permission` until the tool finishes.
+- **Screen text.** Both corrections match text Claude Code 2.1.300 draws. If a
+  later version draws it differently, the pane shows its recorded state, as
+  above, until the next hook; the preview shows the truth.
 - **Sessions started before the plugin loaded** have no hooks and are listed
   as `unknown` until restarted.
 - **A crashed agent** that never ran SessionEnd leaves its last state on the

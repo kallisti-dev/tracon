@@ -5,6 +5,7 @@ pub mod claude;
 use serde_json::Value;
 
 use crate::Error;
+use crate::screen::Sighting;
 use crate::store::Guarded;
 
 pub use claude::Claude;
@@ -21,11 +22,10 @@ pub trait Harness {
     /// harness. Panes running it that no hook has reported are `unknown`.
     fn runs_as(&self, command: &str) -> bool;
 
-    /// Whether a pane's visible screen shows the harness at work. A waiting
-    /// pane that shows this is listed as working, for harnesses whose hooks
-    /// don't report an answered prompt until its tool finishes.
-    fn shows_work(&self, _screen: &str) -> bool {
-        false
+    /// What this harness recognises on a pane's visible screen, given as
+    /// plain text. See [`crate::screen`] for how the list uses it.
+    fn read_screen(&self, _text: &str) -> Option<Sighting> {
+        None
     }
 }
 

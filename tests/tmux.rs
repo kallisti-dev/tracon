@@ -579,9 +579,12 @@ fn focusing_a_finished_pane_marks_it_seen() {
 }
 
 #[test]
-fn a_waiting_pane_that_shows_work_is_listed_as_working() {
+fn waiting_panes_are_listed_from_what_their_screen_shows() {
     let server = Server::start();
-    server.hook("%0", event("PermissionRequest", bash(None)));
+    let refused = server.new_window("work");
+    for pane in ["%0", &refused] {
+        server.hook(pane, event("PermissionRequest", bash(None)));
+    }
     // `✶ Kerfuffling… (21s · ↓ 109 tokens)`, coloured as Claude Code draws
     // it. Octal escapes keep the typed line ASCII, which the shell reads
     // intact without a UTF-8 locale, as in the Nix sandbox.
@@ -592,12 +595,23 @@ fn a_waiting_pane_that_shows_work_is_listed_as_working() {
         r"printf '\033[38;5;174m\342\234\266 Kerfuffling\342\200\246\033[0m (21s \302\267 \342\206\223 109 tokens)\n'",
         "Enter",
     ]);
-    let pane = |state: &str| ("%0".to_owned(), state.to_owned());
+    let screen = Path::new(ROOT).join("tests/screens/claude-2.1.300/refused-esc.txt");
+    server.tmux(&[
+        "send-keys",
+        "-t",
+        &refused,
+        &format!("cat '{}'", screen.display()),
+        "Enter",
+    ]);
+    let pane = |id: &str, state: &str| (id.to_owned(), state.to_owned());
     wait_until(
-        "the pane is listed as working",
+        "the panes are listed from their screens",
         Duration::from_secs(10),
-        || (server.listed() == [pane("working")]).then_some(()),
+        || (server.listed() == [pane("%0", "working"), pane(&refused, "idle")]).then_some(()),
     );
+    let list = server.list();
+    assert_eq!(list[0]["sighting"], "working");
+    assert_eq!(list[1]["sighting"], "interrupted");
     assert_eq!(server.state("%0"), "waiting.permission");
 }
 

@@ -8,6 +8,7 @@ pub mod backend;
 pub mod config;
 pub mod harness;
 pub mod list;
+pub mod screen;
 pub mod state;
 pub mod store;
 pub mod tmux;

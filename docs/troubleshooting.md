@@ -64,11 +64,14 @@ pane, as inside a nested multiplexer. Restart the session in this pane.
 
 ## A pane shows the wrong state
 
-Claude Code reports nothing when you interrupt it, press Esc at a prompt, or
-answer "No" without a comment, so the pane keeps its last state until your
-next prompt. See [compatibility](compatibility.md#blind-spots). To inspect
-what a pane records:
+Claude Code reports nothing when you approve a prompt, interrupt it, press
+Esc at a prompt, or answer "No" without a comment. tracon covers those by
+reading the screen, and if a Claude Code update changed the text it reads,
+the pane keeps its last state until your next prompt. See
+[compatibility](compatibility.md#blind-spots). To inspect what a pane
+records, and what tracon read on its screen (`sighting`):
 
 ```sh
 tmux show-options -p -t %3 | grep @tracon_
+tracon list --json
 ```

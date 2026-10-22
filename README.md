@@ -106,11 +106,10 @@ Claude Code distinguishes:
 | `unknown` | Claude Code runs in the pane, but no hook has reported |
 
 A finished pane becomes `idle` when you focus it, or at once if it finishes
-while you are looking at it. Claude Code doesn't report an approved prompt
-until its tool finishes, so tracon lists the pane as `working` once Claude's
-spinner is back on screen. It reports nothing when you interrupt it or answer
-a prompt with Esc or a bare "No", so such a pane shows its last state until
-your next prompt; the preview shows the truth. See
+while you are looking at it. Claude Code reports neither an approved prompt
+nor an interrupt, so tracon also reads the screen of a waiting or working
+pane: Claude's spinner lists it as `working`, and its interrupt notice, after
+Esc, Ctrl-C or a bare "No", lists it as `idle`. See
 [compatibility](docs/compatibility.md) for details.
 
 The same list and actions are available as commands, for scripts and other

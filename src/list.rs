@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::backend::{Locator, PaneInfo};
 use crate::harness::Harness;
+use crate::screen::{self, Sighting};
 use crate::state::{Record, Rule, State, sort_by_priority};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -23,18 +24,22 @@ pub struct Entry {
     pub session: Option<String>,
     pub agent: Option<String>,
     pub pinned: bool,
+    /// What the harness recognised on the pane's screen, read for a state
+    /// that can change without a hook; `state` already accounts for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sighting: Option<Sighting>,
 }
 
 /// Join live panes with their records, keep the panes that have an agent
 /// state, a pin or a recognised agent process, and sort them by `rules`.
-/// Records for panes that no longer exist are dropped. `screen` captures a
-/// waiting pane, which is listed as working if its harness shows work there.
+/// Records for panes that no longer exist are dropped. `text` captures a
+/// pane's screen as plain text, for the corrections in [`crate::screen`].
 pub fn entries(
     panes: Vec<PaneInfo>,
     records: Vec<(Locator, Record)>,
     harnesses: &[Box<dyn Harness>],
     rules: &[Rule],
-    screen: impl Fn(&Locator) -> Option<String>,
+    text: impl Fn(&Locator) -> Option<String>,
 ) -> Vec<Entry> {
     let mut records: HashMap<Locator, Record> = records.into_iter().collect();
     let mut entries: Vec<Entry> = panes
@@ -47,12 +52,17 @@ pub fn entries(
                 record.state = Some(State::known(State::UNKNOWN));
                 record.harness = Some(harness.name().to_owned());
             }
-            if let (Some(state), Some(name)) = (&record.state, &record.harness)
-                && state.is_under(&State::known(State::WAITING))
-                && let Some(harness) = harnesses.iter().find(|h| h.name() == name)
-                && screen(&info.pane).is_some_and(|screen| harness.shows_work(&screen))
+            let sighting = record
+                .state
+                .as_ref()
+                .filter(|state| screen::correctable(state))
+                .and(record.harness.as_deref())
+                .and_then(|name| harnesses.iter().find(|h| h.name() == name))
+                .and_then(|harness| text(&info.pane).and_then(|text| harness.read_screen(&text)));
+            if let (Some(state), Some(sighting)) = (&record.state, sighting)
+                && let Some(corrected) = screen::correct(state, sighting)
             {
-                record.state = Some(State::known(State::WORKING));
+                record.state = Some(corrected);
             }
             (record.state.is_some() || record.pinned).then_some(Entry {
                 pane: info.pane,
@@ -66,6 +76,7 @@ pub fn entries(
                 session: record.session,
                 agent: record.agent,
                 pinned: record.pinned,
+                sighting,
             })
         })
         .collect();
@@ -145,29 +156,80 @@ mod tests {
         assert_eq!(listed[4].harness.as_deref(), Some("claude"));
     }
 
+    /// A harness whose screens are the names of sightings.
+    struct Reader;
+
+    impl Harness for Reader {
+        fn name(&self) -> &'static str {
+            "reader"
+        }
+
+        fn interpret(
+            &self,
+            _: &serde_json::Value,
+        ) -> Result<Option<crate::store::Guarded>, crate::Error> {
+            Ok(None)
+        }
+
+        fn runs_as(&self, _: &str) -> bool {
+            false
+        }
+
+        fn read_screen(&self, text: &str) -> Option<Sighting> {
+            match text {
+                "prompt" => Some(Sighting::Prompt),
+                "working" => Some(Sighting::Working),
+                "interrupted" => Some(Sighting::Interrupted),
+                _ => None,
+            }
+        }
+    }
+
     #[test]
-    fn a_waiting_pane_that_shows_work_is_listed_as_working() {
-        let mut waiting = record("waiting.permission", 30);
-        waiting.harness = Some("claude".to_owned());
-        let panes = vec![pane("%1", "claude"), pane("%2", "claude")];
-        let records = vec![
-            (Locator::tmux("%1"), waiting.clone()),
-            (Locator::tmux("%2"), waiting),
+    fn screens_correct_states_that_change_without_a_hook() {
+        let cases = [
+            ("%1", "waiting.permission", "working", "working"),
+            ("%2", "waiting.permission", "prompt", "waiting.permission"),
+            ("%3", "working", "interrupted", "idle"),
+            ("%4", "waiting.question", "unrecognised", "waiting.question"),
+            ("%5", "done", "interrupted", "done"),
         ];
+        let panes = cases.iter().map(|(id, ..)| pane(id, "reader")).collect();
+        let records = cases
+            .iter()
+            .map(|(id, state, ..)| {
+                let record = Record {
+                    harness: Some("reader".to_owned()),
+                    ..record(state, 30)
+                };
+                (Locator::tmux(id), record)
+            })
+            .collect();
+        let harnesses: Vec<Box<dyn Harness>> = vec![Box::new(Reader)];
         let listed = entries(
             panes,
             records,
-            &harness::all(),
+            &harnesses,
             &Config::default().order,
-            |pane| (pane.id == "%1").then(|| "✶ Kerfuffling… (21s · ↓ 109 tokens)".to_owned()),
+            |pane| {
+                cases
+                    .iter()
+                    .find(|(id, ..)| *id == pane.id)
+                    .map(|(_, _, text, _)| text.to_string())
+            },
         );
-        let summary: Vec<_> = listed
-            .iter()
-            .map(|e| (e.pane.id.as_str(), e.state.as_ref().map(State::as_str)))
-            .collect();
-        assert_eq!(
-            summary,
-            [("%2", Some("waiting.permission")), ("%1", Some("working"))]
-        );
+        for (id, _, _, expected) in cases {
+            let entry = listed.iter().find(|entry| entry.pane.id == id).unwrap();
+            assert_eq!(
+                entry.state.as_ref().map(State::as_str),
+                Some(expected),
+                "{id}"
+            );
+        }
+        let sighting = |id: &str| listed.iter().find(|e| e.pane.id == id).unwrap().sighting;
+        assert_eq!(sighting("%1"), Some(Sighting::Working));
+        assert_eq!(sighting("%4"), None);
+        // A finished pane's screen isn't read.
+        assert_eq!(sighting("%5"), None);
     }
 }
