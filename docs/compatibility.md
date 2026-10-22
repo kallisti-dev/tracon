@@ -23,6 +23,7 @@ from a real session in a tmux pane:
 | --- | --- |
 | A permission prompt appears | `PreToolUse`, `PermissionRequest`, then `Notification` `permission_prompt` about six seconds later |
 | Approve | `PostToolUse` when the tool finishes, `PostToolBatch`, `Stop` |
+| Approve within six seconds | the same, with no `permission_prompt` notification |
 | Reject with "No" | nothing |
 | Reject with a comment | `PostToolBatch`, then `Stop` |
 | Esc at a prompt | nothing |
@@ -34,6 +35,10 @@ from a real session in a tmux pane:
 | After approving it | the subagent's `PostToolUse`, `PostToolBatch` and `SubagentStop`, then a main-agent `UserPromptSubmit` and `Stop` as Claude takes its result |
 
 No `idle_prompt` notification arrived within 70 seconds of a bare "No".
+While an approved command ran (checked on 2026-10-22), nothing was written to
+the session transcript and the pane title didn't change; the screen showed a
+spinner line such as `✶ Kerfuffling… (21s · ↓ 109 tokens)`, which the
+permission dialog replaces.
 tmux's `pane-focus-in` fired on attach, on `select-pane`, and when the
 terminal reported focus.
 
@@ -45,7 +50,10 @@ terminal reported focus.
   notification; the preview shows the truth. Claude Code does write
   `[Request interrupted by user for tool use]` to the transcript, which a
   later version could read.
-- **Approval lag.** Nothing fires when a prompt is approved, so the pane stays
+- **Approval lag.** Nothing fires when a prompt is approved, so the record
+  stays `waiting.permission` until the tool finishes. tracon lists such a pane
+  as `working` while its screen shows Claude Code's spinner line and no dialog.
+  If a later Claude Code draws the spinner differently, the pane shows
   `waiting.permission` until the tool finishes.
 - **Sessions started before the plugin loaded** have no hooks and are listed
   as `unknown` until restarted.

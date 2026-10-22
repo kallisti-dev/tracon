@@ -20,6 +20,13 @@ pub trait Harness {
     /// Whether a pane's foreground command, as tmux reports it, is this
     /// harness. Panes running it that no hook has reported are `unknown`.
     fn runs_as(&self, command: &str) -> bool;
+
+    /// Whether a pane's visible screen shows the harness at work. A waiting
+    /// pane that shows this is listed as working, for harnesses whose hooks
+    /// don't report an answered prompt until its tool finishes.
+    fn shows_work(&self, _screen: &str) -> bool {
+        false
+    }
 }
 
 /// Every built-in harness.

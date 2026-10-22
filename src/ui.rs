@@ -239,7 +239,13 @@ impl Picker<'_> {
         let selected = self.selected().map(|entry| entry.pane.clone());
         let records = self.store.load()?;
         let panes = self.backend.panes()?;
-        self.entries = list::entries(panes, records, &harness::all(), &self.config.order);
+        self.entries = list::entries(
+            panes,
+            records,
+            &harness::all(),
+            &self.config.order,
+            |pane| self.backend.text(pane).ok(),
+        );
         self.refilter(selected);
         Ok(())
     }

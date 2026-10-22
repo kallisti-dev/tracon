@@ -199,6 +199,11 @@ impl Backend for TmuxBackend {
         self.tmux.run(["capture-pane", "-e", "-p", "-t", pane])
     }
 
+    fn text(&self, pane: &Locator) -> Result<String, Error> {
+        let pane = pane_id(pane)?;
+        self.tmux.run(["capture-pane", "-p", "-t", pane])
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             popup: true,

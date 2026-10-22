@@ -93,6 +93,8 @@ pub trait Backend {
     fn alive(&self, pane: &Locator) -> Result<bool, Error>;
     /// The pane's visible screen.
     fn capture(&self, pane: &Locator) -> Result<String, Error>;
+    /// The pane's visible screen without colours or attributes.
+    fn text(&self, pane: &Locator) -> Result<String, Error>;
     fn capabilities(&self) -> Capabilities;
     fn host(&self, pane: &Locator) -> Result<Option<Host>, Error>;
 }

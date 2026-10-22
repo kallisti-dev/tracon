@@ -93,6 +93,13 @@ didn't report ending, but leaves `done` until the pane is seen, and
 `working.background` until Claude takes the tasks' results, since the prompt
 sits idle while they run.
 
+Nothing fires when a prompt is approved either, so the record stays waiting
+while the approved tool runs. The list reads the screen of each waiting pane
+(`Harness::shows_work`): one showing Claude Code's spinner line, and no
+dialog footer, is listed as `working`. Nothing is written, so the hooks
+remain the only writers, and a screen that doesn't match leaves the pane
+waiting.
+
 ## Store
 
 The tmux store keeps the record in pane options, which die with the pane,

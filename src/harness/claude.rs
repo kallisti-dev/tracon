@@ -60,6 +60,23 @@ fn tool_summary(payload: &Value) -> String {
     }
 }
 
+/// The line Claude Code shows while it works, such as `✶ Kerfuffling… (21s ·
+/// ↓ 109 tokens)`. A finished turn leaves `✻ Crunched for 28s` instead.
+fn spinner(line: &str) -> bool {
+    let Some((glyph, rest)) = line.split_once(' ') else {
+        return false;
+    };
+    let mut glyph = glyph.chars();
+    let symbol = matches!((glyph.next(), glyph.next()), (Some(c), None) if !c.is_alphanumeric());
+    let Some((verb, rest)) = rest.split_once("… (") else {
+        return false;
+    };
+    symbol
+        && !verb.is_empty()
+        && verb.chars().all(char::is_alphabetic)
+        && rest.starts_with(|c: char| c.is_ascii_digit())
+}
+
 fn waiting_by(agent: Option<&str>) -> Cond {
     Cond::All(vec![
         Cond::StateUnder(State::known(State::WAITING)),
@@ -87,6 +104,15 @@ impl Harness for Claude {
 
     fn runs_as(&self, command: &str) -> bool {
         command_is(command, "claude")
+    }
+
+    /// Nothing fires when a prompt is approved, but the spinner returns while
+    /// the tool runs. A dialog hides the spinner; its footer is checked too
+    /// in case one ever shows both.
+    fn shows_work(&self, screen: &str) -> bool {
+        let lines: Vec<&str> = screen.lines().map(str::trim).collect();
+        !lines.iter().any(|line| line.contains("Esc to cancel"))
+            && lines.iter().any(|line| spinner(line))
     }
 
     fn interpret(&self, payload: &Value) -> Result<Option<Guarded>, Error> {
@@ -519,5 +545,54 @@ mod tests {
         let agent = json!({ "hook_event_name": "PostToolUse", "agent_id": "a,b" });
         assert!(Claude.interpret(&agent).is_err());
         assert_eq!(Claude.interpret(&event("FileChanged")).unwrap(), None);
+    }
+
+    // Excerpts of Claude Code 2.1.300's screen around one approved command.
+    const DIALOG: &str = "\
+❯ Run exactly this Bash command and nothing else: ping -c 25 127.0.0.1 > ping2.txt
+  Pinging localhost 25 times, writing output to ping2.txt
+  ⎿  $ ping -c 25 127.0.0.1 > ping2.txt
+────────────────────────────────────────
+ Bash command
+ Ping localhost 25 times, writing output to ping2.txt
+ ping -c 25 127.0.0.1 > ping2.txt
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to work/ from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+ Esc to cancel · Tab to amend
+";
+    const RUNNING: &str = "\
+❯ Run exactly this Bash command and nothing else: ping -c 25 127.0.0.1 > ping2.txt
+⏺ Pinging localhost 25 times, writing output to ping2.txt · 21s
+  ⎿  $ ping -c 25 127.0.0.1 > ping2.txt (5s)
+     (ctrl+b ctrl+b (twice) to run in background)
+✶ Kerfuffling… (21s · ↓ 109 tokens)
+                                                            ◐ medium · /effort
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  Haiku 5.5 · 5% context
+  -- INSERT -- ⏸ manual mode on · ← 1 agent
+";
+    const FINISHED: &str = "\
+⏺ I ran ping -c 25 127.0.0.1 > ping2.txt as requested.
+✻ Crunched for 28s · done 8:39 PM
+────────────────────────────────────────
+❯ show me the contents of ping2.txt
+";
+
+    #[test]
+    fn the_screen_shows_work_only_while_a_tool_runs() {
+        assert!(!Claude.shows_work(DIALOG));
+        assert!(Claude.shows_work(RUNNING));
+        assert!(!Claude.shows_work(FINISHED));
+        let both = format!("✶ Kerfuffling… (3s · ↓ 9 tokens)\n{DIALOG}");
+        assert!(!Claude.shows_work(&both));
+        assert!(spinner(
+            "✢ Moseying… (1m 5s · ↑ 2.1k tokens · esc to interrupt)"
+        ));
+        assert!(!spinner("Reading… (3 files)"));
     }
 }

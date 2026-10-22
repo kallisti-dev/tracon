@@ -179,6 +179,7 @@ pub fn entries(tmux: &Tmux, backend: &impl Backend, store: &impl Store) -> Resul
         records,
         &harness::all(),
         &config.order,
+        |pane| backend.text(pane).ok(),
     ))
 }
 
