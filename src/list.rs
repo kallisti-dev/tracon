@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::backend::{Locator, PaneInfo};
+use crate::config::Config;
 use crate::harness::Harness;
 use crate::screen::{self, Sighting};
-use crate::state::{Record, Rule, State, sort_by_priority};
+use crate::state::{Record, Standing, State, sort_by_priority};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Entry {
@@ -24,6 +25,7 @@ pub struct Entry {
     pub session: Option<String>,
     pub agent: Option<String>,
     pub pinned: bool,
+    pub viewed: Option<u64>,
     /// What the harness recognised on the pane's screen, read for a state
     /// that can change without a hook; `state` already accounts for it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,14 +33,14 @@ pub struct Entry {
 }
 
 /// Join live panes with their records, keep the panes that have an agent
-/// state, a pin or a recognised agent process, and sort them by `rules`.
-/// Records for panes that no longer exist are dropped. `text` captures a
-/// pane's screen as plain text, for the corrections in [`crate::screen`].
+/// state, a pin or a recognised agent process, and sort them as `config`
+/// says. Records for panes that no longer exist are dropped. `text` captures
+/// a pane's screen as plain text, for the corrections in [`crate::screen`].
 pub fn entries(
     panes: Vec<PaneInfo>,
     records: Vec<(Locator, Record)>,
     harnesses: &[Box<dyn Harness>],
-    rules: &[Rule],
+    config: &Config,
     text: impl Fn(&Locator) -> Option<String>,
 ) -> Vec<Entry> {
     let mut records: HashMap<Locator, Record> = records.into_iter().collect();
@@ -76,12 +78,18 @@ pub fn entries(
                 session: record.session,
                 agent: record.agent,
                 pinned: record.pinned,
+                viewed: record.viewed,
                 sighting,
             })
         })
         .collect();
-    sort_by_priority(&mut entries, rules, |entry| {
-        (entry.state.as_ref(), entry.pinned, entry.since)
+    sort_by_priority(&mut entries, &config.order, &config.recent_first, |entry| {
+        Standing {
+            state: entry.state.as_ref(),
+            pinned: entry.pinned,
+            since: entry.since,
+            viewed: entry.viewed,
+        }
     });
     entries
 }
@@ -89,7 +97,6 @@ pub fn entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::harness;
 
     fn pane(id: &str, command: &str) -> PaneInfo {
@@ -132,13 +139,9 @@ mod tests {
             (Locator::tmux("%6"), record("done", 10)),
             (Locator::tmux("%9"), record("waiting", 1)),
         ];
-        let listed = entries(
-            panes,
-            records,
-            &harness::all(),
-            &Config::default().order,
-            |_| None,
-        );
+        let listed = entries(panes, records, &harness::all(), &Config::default(), |_| {
+            None
+        });
         let summary: Vec<_> = listed
             .iter()
             .map(|e| (e.pane.id.as_str(), e.state.as_ref().map(State::as_str)))
@@ -206,18 +209,12 @@ mod tests {
             })
             .collect();
         let harnesses: Vec<Box<dyn Harness>> = vec![Box::new(Reader)];
-        let listed = entries(
-            panes,
-            records,
-            &harnesses,
-            &Config::default().order,
-            |pane| {
-                cases
-                    .iter()
-                    .find(|(id, ..)| *id == pane.id)
-                    .map(|(_, _, text, _)| text.to_string())
-            },
-        );
+        let listed = entries(panes, records, &harnesses, &Config::default(), |pane| {
+            cases
+                .iter()
+                .find(|(id, ..)| *id == pane.id)
+                .map(|(_, _, text, _)| text.to_string())
+        });
         for (id, _, _, expected) in cases {
             let entry = listed.iter().find(|entry| entry.pane.id == id).unwrap();
             assert_eq!(

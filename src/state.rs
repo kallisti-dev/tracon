@@ -99,6 +99,8 @@ pub struct Record {
     /// The subagent that raised the current `waiting` state, if one did.
     pub agent: Option<String>,
     pub pinned: bool,
+    /// Seconds since the Unix epoch when a client last focused the pane.
+    pub viewed: Option<u64>,
 }
 
 /// One entry of the `order` list: a state, matching everything beneath it, or
@@ -114,6 +116,15 @@ impl Rule {
         match self {
             Rule::Pinned => pinned,
             Rule::State(rule) => state.is_some_and(|state| state.is_under(rule)),
+        }
+    }
+
+    /// Whether every pane this rule matches, `other` matches too.
+    fn within(&self, other: &Rule) -> bool {
+        match (self, other) {
+            (Rule::Pinned, Rule::Pinned) => true,
+            (Rule::State(state), Rule::State(other)) => state.is_under(other),
+            _ => false,
         }
     }
 }
@@ -153,16 +164,44 @@ pub fn rank(rules: &[Rule], state: Option<&State>, pinned: bool) -> usize {
         .unwrap_or(rules.len())
 }
 
-/// Sort items by the group their state falls in, then longest wait first. A
-/// missing `since` sorts after every known time in its group.
+/// What sorting reads from one item.
+pub struct Standing<'a> {
+    pub state: Option<&'a State>,
+    pub pinned: bool,
+    /// When the item entered its state.
+    pub since: Option<u64>,
+    /// When a client last focused it.
+    pub viewed: Option<u64>,
+}
+
+/// Sort items by the group their state falls in. Within a group, the item
+/// longest in its state comes first. In a group whose rule lies within one
+/// of `recent_first`, the item viewed most recently comes first instead,
+/// then items never viewed, newest state first. A missing time sorts last.
 pub fn sort_by_priority<T>(
     items: &mut [T],
     rules: &[Rule],
-    key: impl Fn(&T) -> (Option<&State>, bool, Option<u64>),
+    recent_first: &[Rule],
+    key: impl Fn(&T) -> Standing<'_>,
 ) {
+    let latest_first = |time: Option<u64>| time.map_or(u64::MAX, |time| u64::MAX - time);
     items.sort_by_cached_key(|item| {
-        let (state, pinned, since) = key(item);
-        (rank(rules, state, pinned), since.unwrap_or(u64::MAX))
+        let Standing {
+            state,
+            pinned,
+            since,
+            viewed,
+        } = key(item);
+        let group = rank(rules, state, pinned);
+        let by_view = rules
+            .get(group)
+            .is_some_and(|rule| recent_first.iter().any(|recent| rule.within(recent)));
+        let within = if by_view {
+            (viewed.is_none(), latest_first(viewed), latest_first(since))
+        } else {
+            (false, since.unwrap_or(u64::MAX), 0)
+        };
+        (group, within)
     });
 }
 
@@ -218,9 +257,14 @@ mod tests {
             ("other", false, Some(0)),
         ];
         let parsed: Vec<_> = panes.iter().map(|(name, _, _)| state(name)).collect();
-        sort_by_priority(&mut panes, &rules, |(name, pinned, since)| {
+        sort_by_priority(&mut panes, &rules, &[], |(name, pinned, since)| {
             let index = parsed.iter().position(|s| s.as_str() == *name).unwrap();
-            (Some(&parsed[index]), *pinned, *since)
+            Standing {
+                state: Some(&parsed[index]),
+                pinned: *pinned,
+                since: *since,
+                viewed: None,
+            }
         });
         let names: Vec<_> = panes.iter().map(|(name, _, _)| *name).collect();
         assert_eq!(
@@ -234,6 +278,45 @@ mod tests {
                 "idle",
                 "unknown",
                 "other",
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_first_groups_lead_with_the_pane_viewed_last() {
+        let rules = parse_order("done idle").unwrap();
+        let recent_first = parse_order("idle").unwrap();
+        // (name, state, since, viewed)
+        let mut panes = vec![
+            ("old idle, viewed early", "idle", 10, Some(100)),
+            ("new idle, never viewed", "idle", 50, None),
+            ("old idle, never viewed", "idle", 5, None),
+            ("idle, viewed last", "idle", 40, Some(200)),
+            ("new done, viewed last", "done", 60, Some(300)),
+            ("old done", "done", 20, None),
+        ];
+        let parsed: Vec<_> = panes.iter().map(|(_, name, ..)| state(name)).collect();
+        sort_by_priority(
+            &mut panes,
+            &rules,
+            &recent_first,
+            |(_, name, since, viewed)| Standing {
+                state: parsed.iter().find(|s| s.as_str() == *name),
+                pinned: false,
+                since: Some(*since),
+                viewed: *viewed,
+            },
+        );
+        let names: Vec<_> = panes.iter().map(|(name, ..)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "old done",
+                "new done, viewed last",
+                "idle, viewed last",
+                "old idle, viewed early",
+                "new idle, never viewed",
+                "old idle, never viewed",
             ]
         );
     }

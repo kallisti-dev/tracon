@@ -54,7 +54,8 @@ enum Command {
     Pin { pane: Option<Locator> },
     /// Unpin a pane, the current one by default.
     Unpin { pane: Option<Locator> },
-    /// Mark a finished pane as seen, the current one by default.
+    /// Record that a pane was viewed, marking it seen if it finished; the
+    /// current one by default. The focus hook runs this.
     Seen { pane: Option<Locator> },
     /// Choose a pane interactively.
     Pick {
@@ -134,7 +135,10 @@ fn dispatch(command: Command) -> Result<ExitCode> {
         Command::Pin { pane } => store.set_pinned(&target(&backend, pane)?, true)?,
         Command::Unpin { pane } => store.set_pinned(&target(&backend, pane)?, false)?,
         Command::Seen { pane } => {
-            store.apply(&target(&backend, pane)?, &seen(), tracon::now())?;
+            let pane = target(&backend, pane)?;
+            let now = tracon::now();
+            store.set_viewed(&pane, now)?;
+            store.apply(&pane, &seen(), now)?;
         }
         Command::Pick { client } => {
             let client = client_hint(client);
@@ -178,7 +182,7 @@ pub fn entries(tmux: &Tmux, backend: &impl Backend, store: &impl Store) -> Resul
         panes,
         records,
         &harness::all(),
-        &config.order,
+        &config,
         |pane| backend.text(pane).ok(),
     ))
 }
@@ -230,6 +234,7 @@ fn hook(name: &str) -> Result<()> {
         let finishes = matches!(&change.change, Change::Set(update)
             if update.state.is_under(&State::known(State::DONE)));
         if finishes && backend.in_view(&pane)? {
+            store.set_viewed(&pane, now)?;
             store.apply(&pane, &seen(), now)?;
         }
     }

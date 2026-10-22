@@ -136,6 +136,7 @@ are readable by other tools, and need no daemon:
 | `@tracon_session` | The harness session id |
 | `@tracon_agent` | The subagent whose wait is shown, if any |
 | `@tracon_pinned` | `1` when pinned; outlives the state |
+| `@tracon_viewed` | When a client last focused the pane, in seconds since the epoch; outlives the state |
 
 Each change is one tmux invocation: `if-shell -F` with the condition as a
 tmux format, running the option changes, followed by `wait-for -S tracon`.
@@ -151,7 +152,14 @@ a state matches itself and the states beneath it, and `pinned` matches pinned
 panes. Within a group, the pane that entered its state first is listed
 first. Panes that match no rule go last. The default is `waiting pinned error
 done working idle unknown`, and the tmux option `@tracon-order` replaces it.
-Every tunable is in `Config` (`src/config.rs`).
+
+`recent_first` names the groups that sort by when a client last focused the
+pane instead, most recent first, then panes never focused, newest state
+first: a group sorts this way when its rule lies within one of these. The
+default is `working idle unknown`, so the attention groups stay queues while
+a pane you just saw stays easy to find; `@tracon-recent-first` replaces it.
+The focus hook records the time in `@tracon_viewed`, since tmux keeps no
+per-pane focus time. Every tunable is in `Config` (`src/config.rs`).
 
 ## Focus
 

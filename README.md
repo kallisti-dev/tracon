@@ -135,6 +135,7 @@ before `programs.tmux.extraConfig`.
 | --- | --- | --- |
 | `@tracon-key` | `a` | Key in the prefix table that opens the picker |
 | `@tracon-order` | `waiting pinned error done working idle unknown` | Groups the list is sorted into |
+| `@tracon-recent-first` | `working idle unknown` | Groups that list the pane you viewed last first |
 | `@tracon-preview-interval` | `100` | Milliseconds between refreshes of the picker's preview |
 
 Each preview refresh runs `tmux capture-pane` once. On a slow machine, a
@@ -144,9 +145,12 @@ choppier preview.
 `@tracon-order` is a list of states. Each pane goes in the group of the first
 state it matches, where a state also matches the states beneath it
 (`waiting` matches `waiting.permission`) and `pinned` matches pinned panes.
-Within a group, the pane that has been in its state longest comes first.
-Panes that match no entry go last. For example, to keep pinned panes at the
-top:
+Within a group, the pane that has been in its state longest comes first, so
+the oldest prompt is at the top. In the groups `@tracon-recent-first` names,
+the pane you focused most recently comes first instead, so a finished pane
+you just looked at stays near the top of the idle panes; panes you haven't
+focused follow, newest state first. Panes that match no entry go last. For
+example, to keep pinned panes at the top:
 
 ```tmux
 set -g @tracon-order 'pinned waiting error done working idle unknown'

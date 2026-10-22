@@ -17,8 +17,9 @@ pub const HARNESS: &str = "@tracon_harness";
 pub const SESSION: &str = "@tracon_session";
 pub const AGENT: &str = "@tracon_agent";
 pub const PINNED: &str = "@tracon_pinned";
+pub const VIEWED: &str = "@tracon_viewed";
 
-/// The options cleared with the state; the pin outlives it.
+/// The options cleared with the state; the pin and view time outlive it.
 const STATE_OPTIONS: [&str; 6] = [STATE, SINCE, MESSAGE, HARNESS, SESSION, AGENT];
 
 #[derive(Clone, Debug, Default)]
@@ -137,7 +138,7 @@ fn commands(pane: &str, change: &Change, now: u64) -> String {
 impl Store for TmuxStore {
     fn load(&self) -> Result<Vec<(Locator, Record)>, Error> {
         let fields = [
-            "pane_id", STATE, SINCE, MESSAGE, HARNESS, SESSION, AGENT, PINNED,
+            "pane_id", STATE, SINCE, MESSAGE, HARNESS, SESSION, AGENT, PINNED, VIEWED,
         ];
         let format = fields
             .map(|field| format!("#{{{field}}}"))
@@ -146,7 +147,18 @@ impl Store for TmuxStore {
         let mut records = Vec::new();
         for line in output.lines() {
             let values: Vec<&str> = line.split(SEPARATOR).collect();
-            let [pane, state, since, message, harness, session, agent, pinned] = values[..] else {
+            let [
+                pane,
+                state,
+                since,
+                message,
+                harness,
+                session,
+                agent,
+                pinned,
+                viewed,
+            ] = values[..]
+            else {
                 continue;
             };
             let text = |value: &str| (!value.is_empty()).then(|| value.to_owned());
@@ -159,6 +171,7 @@ impl Store for TmuxStore {
                 session: text(session),
                 agent: text(agent),
                 pinned: pinned == "1",
+                viewed: viewed.parse().ok(),
             };
             if record != Record::default() {
                 records.push((Locator::tmux(pane), record));
@@ -185,6 +198,13 @@ impl Store for TmuxStore {
         }
         args.extend([";", "wait-for", "-S", CHANNEL]);
         self.tmux.run(args)?;
+        Ok(())
+    }
+
+    fn set_viewed(&self, pane: &Locator, at: u64) -> Result<(), Error> {
+        let pane = pane_id(pane)?;
+        self.tmux
+            .run(["set-option", "-p", "-t", pane, VIEWED, &at.to_string()])?;
         Ok(())
     }
 }

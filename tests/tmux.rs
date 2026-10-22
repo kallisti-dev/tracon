@@ -629,6 +629,37 @@ fn a_turn_that_ends_in_view_is_seen() {
 }
 
 #[test]
+fn a_pane_viewed_last_leads_the_idle_group() {
+    let mut server = Server::start();
+    server.setup();
+    let panes: Vec<String> = (0..3).map(|_| server.new_window("work")).collect();
+    for (pane, since) in [(&panes[0], "10"), (&panes[1], "20")] {
+        server.tmux(&["set-option", "-p", "-t", pane, "@tracon_state", "idle"]);
+        server.tmux(&["set-option", "-p", "-t", pane, "@tracon_since", since]);
+    }
+    server.hook(&panes[2], event("Stop", json!({})));
+    let client = server.attach("work");
+    server.tracon("%0", &["focus", &panes[2], "--client", &client]);
+    wait_until("the pane is seen", Duration::from_secs(10), || {
+        (server.state(&panes[2]) == "idle").then_some(())
+    });
+    assert!(!server.option(&panes[2], "@tracon_viewed").is_empty());
+    server.tracon("%0", &["focus", "%0", "--client", &client]);
+    // Panes never viewed follow, newest state first.
+    let idle = |pane: &String| (pane.clone(), "idle".to_owned());
+    assert_eq!(
+        server.listed(),
+        [idle(&panes[2]), idle(&panes[1]), idle(&panes[0])]
+    );
+    // Groups outside @tracon-recent-first keep the longest in state first.
+    server.tmux(&["set-option", "-g", "@tracon-recent-first", "working"]);
+    assert_eq!(
+        server.listed(),
+        [idle(&panes[0]), idle(&panes[1]), idle(&panes[2])]
+    );
+}
+
+#[test]
 fn setup_is_idempotent_and_reversible() {
     let server = Server::start();
     let foreign = "display-message foreign";

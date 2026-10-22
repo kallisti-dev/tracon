@@ -56,7 +56,7 @@ impl Update {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     Set(Update),
-    /// Forget the pane's state, keeping its pin.
+    /// Forget the pane's state, keeping its pin and when it was viewed.
     Clear,
 }
 
@@ -123,6 +123,7 @@ impl Guarded {
             Change::Clear => {
                 *record = Record {
                     pinned: record.pinned,
+                    viewed: record.viewed,
                     ..Record::default()
                 }
             }
@@ -146,6 +147,8 @@ pub trait Store {
     /// Apply `change` to `pane` if its condition holds, at time `now`.
     fn apply(&self, pane: &Locator, change: &Guarded, now: u64) -> Result<(), Error>;
     fn set_pinned(&self, pane: &Locator, pinned: bool) -> Result<(), Error>;
+    /// Record that a client focused `pane` at `at`.
+    fn set_viewed(&self, pane: &Locator, at: u64) -> Result<(), Error>;
 }
 
 /// Session and agent ids appear in store queries, so they are limited to the
