@@ -72,7 +72,7 @@ events through the tmux store and compare each step with it.
 | `Elicitation` | `waiting.question` | always |
 | `Notification` `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog` | `waiting.permission` or `waiting.question` | not already waiting |
 | `Notification` `idle_prompt` | `idle` | not `done` or `working.background` |
-| `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PreCompact`, `ElicitationResult` | `working` | see below |
+| `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `ElicitationResult` | `working` | see below |
 | `Stop` | `done`, or `working.background` with background tasks | no subagent waits |
 | `StopFailure` | `error`, with the error as message | no subagent waits |
 | `SubagentStop` | `working` | that subagent's wait |
@@ -92,6 +92,12 @@ which fire nothing else. `idle_prompt` ends a wait or turn that Claude Code
 didn't report ending, but leaves `done` until the pane is seen, and
 `working.background` until Claude takes the tasks' results, since the prompt
 sits idle while they run.
+
+Compaction leaves the state alone. Claude Code compacts mid-turn when the
+context fills, but also at `/compact` and on its own while a session idles,
+after the turn's `Stop`, and no `Stop` follows. Its events, `PreCompact`, the
+compacting subagent's `SubagentStop`, `SessionStart` with source `compact` and
+`PostCompact`, say nothing about the turn.
 
 ## Screen reading
 

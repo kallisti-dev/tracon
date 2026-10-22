@@ -16,8 +16,8 @@ tracon then lists Claude panes as `unknown`.
 
 ## What Claude Code reports
 
-Observed with Claude Code 2.1.300 on 2026-10-19, logging every hook event
-from a real session in a tmux pane:
+Observed with Claude Code 2.1.300 on 2026-10-19 and 2026-10-21, logging
+every hook event from a real session in a tmux pane:
 
 | Action | Events |
 | --- | --- |
@@ -33,9 +33,10 @@ from a real session in a tmux pane:
 | A turn ends while a background subagent runs | `Stop` with the subagent in `background_tasks` |
 | That subagent asks permission | `PreToolUse` and `PermissionRequest` with its `agent_id`, then the notification without one |
 | After approving it | the subagent's `PostToolUse`, `PostToolBatch` and `SubagentStop`, then a main-agent `UserPromptSubmit` and `Stop` as Claude takes its result |
+| `/compact` after a turn | `PreCompact` with trigger `manual`, `SubagentStop` with the compacting subagent's `agent_id`, `SessionStart` with source `compact`, `PostCompact`; no `Stop` |
 
 No `idle_prompt` notification arrived within 70 seconds of a bare "No".
-While an approved command ran (checked on 2026-10-22), nothing was written to
+While an approved command ran (checked on 2026-10-21), nothing was written to
 the session transcript and the pane title didn't change; the screen showed a
 spinner line such as `✶ Kerfuffling… (21s · ↓ 109 tokens)`, which the
 permission dialog replaces. The dialog is already drawn when the
@@ -47,6 +48,12 @@ instead?` above the input box. With vim mode on, the first Esc while Claude
 works only leaves insert mode.
 tmux's `pane-focus-in` fired on attach, on `select-pane`, and when the
 terminal reported focus.
+
+When a session's prompt cache lasts an hour, Claude Code also compacts the
+session while it sits idle, about 50 minutes after the turn ends, and prints
+`Compacted while idle, before the prompt cache expired`. It does so through
+the routine `/compact` uses, so the same events should fire; in four sessions
+seen on 2026-10-21, a hook ran as the compaction began and no `Stop` followed.
 
 ## Blind spots
 

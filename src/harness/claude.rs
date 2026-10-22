@@ -118,7 +118,8 @@ impl Harness for Claude {
 
         Ok(match event {
             "SessionStart" => {
-                // Compaction restarts the session mid-turn.
+                // Compaction restarts the session, mid-turn or between
+                // turns, and leaves the turn as it was.
                 if text(payload, "source") == Some("compact") {
                     return Ok(None);
                 }
@@ -202,8 +203,7 @@ impl Harness for Claude {
                 }
                 _ => None,
             },
-            "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" | "PreCompact"
-            | "ElicitationResult" => {
+            "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" | "ElicitationResult" => {
                 let mut update = set(State::WORKING);
                 if matches!(event, "PostToolUse" | "PostToolUseFailure") {
                     update.message = message(&tool_summary(payload));
@@ -506,13 +506,23 @@ mod tests {
     }
 
     #[test]
-    fn compaction_keeps_the_turn() {
-        let record = replay(&[
-            event("UserPromptSubmit"),
-            event("PreCompact"),
-            with(event("SessionStart"), json!({ "source": "compact" })),
-        ]);
-        assert_eq!(state(&record), "working");
+    fn compaction_keeps_the_state() {
+        // What Claude Code 2.1.300 sends for one compaction.
+        let compaction = |trigger: &str| {
+            [
+                with(event("PreCompact"), json!({ "trigger": trigger })),
+                with(event("SubagentStop"), json!({ "agent_id": "compactor" })),
+                with(event("SessionStart"), json!({ "source": "compact" })),
+                with(event("PostCompact"), json!({ "trigger": trigger })),
+            ]
+        };
+        let mut mid_turn = vec![event("UserPromptSubmit")];
+        mid_turn.extend(compaction("auto"));
+        assert_eq!(state(&replay(&mid_turn)), "working");
+        // `/compact`, and compaction while the session idles.
+        let mut between_turns = vec![event("UserPromptSubmit"), event("Stop")];
+        between_turns.extend(compaction("manual"));
+        assert_eq!(state(&replay(&between_turns)), "done");
     }
 
     #[test]

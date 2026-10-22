@@ -766,7 +766,7 @@ fn every_registered_claude_hook_runs() {
             events += 1;
         }
     }
-    assert!(events >= 15, "{events} hooks");
+    assert!(events >= 14, "{events} hooks");
     run("SessionStart", groups_command(&hooks, "SessionStart"));
     assert_eq!(server.state("%0"), "idle");
     run("SessionEnd", &session_end.expect("a SessionEnd hook"));
