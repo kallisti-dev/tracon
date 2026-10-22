@@ -24,7 +24,8 @@ use tracon::store::{Store, TmuxStore};
 use tracon::tmux::{CHANNEL, Tmux};
 use tracon::{Config, State, harness};
 
-const PREVIEW_INTERVAL: Duration = Duration::from_millis(500);
+/// The longest the picker waits for a key before checking for changes.
+const TICK: Duration = Duration::from_millis(100);
 /// Refreshes ages and catches changes made without the signal.
 const LIST_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -485,9 +486,11 @@ fn event_loop(
 ) -> Result<()> {
     let mut last_list = Instant::now();
     let mut last_preview = Instant::now();
+    let preview_interval = picker.config.preview_interval;
     loop {
         terminal.draw(|frame| picker.draw(frame))?;
-        if event::poll(Duration::from_millis(100))?
+        let wait = TICK.min(preview_interval.saturating_sub(last_preview.elapsed()));
+        if event::poll(wait)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
             && picker.key(key)?
@@ -500,7 +503,7 @@ fn event_loop(
         }
         let moved =
             picker.selected().map(|entry| entry.pane.id.as_str()) != picker.preview_pane.as_deref();
-        if moved || last_preview.elapsed() >= PREVIEW_INTERVAL {
+        if moved || last_preview.elapsed() >= preview_interval {
             picker.refresh_preview();
             last_preview = Instant::now();
         }

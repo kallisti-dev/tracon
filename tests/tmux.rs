@@ -829,6 +829,14 @@ fn check_reports_a_working_setup() {
     }
     // Claude Code isn't installed here, or doesn't load the plugin.
     assert!(!report.contains("problem  tmux"), "{report}");
+
+    server.tmux(&["set-option", "-g", "@tracon-preview-interval", "fast"]);
+    let output = server.tracon_output("%0", &["check"], None);
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        report.contains("a tracon option is invalid: invalid @tracon-preview-interval \"fast\""),
+        "{report}"
+    );
 }
 
 /// Real Claude Code, without network access: requests go to a closed local

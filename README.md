@@ -136,6 +136,11 @@ before `programs.tmux.extraConfig`.
 | --- | --- | --- |
 | `@tracon-key` | `a` | Key in the prefix table that opens the picker |
 | `@tracon-order` | `waiting pinned error done working idle unknown` | Groups the list is sorted into |
+| `@tracon-preview-interval` | `100` | Milliseconds between refreshes of the picker's preview |
+
+Each preview refresh runs `tmux capture-pane` once. On a slow machine, a
+longer interval such as `500` makes the picker lighter at the cost of a
+choppier preview.
 
 `@tracon-order` is a list of states. Each pane goes in the group of the first
 state it matches, where a state also matches the states beneath it

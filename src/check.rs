@@ -110,7 +110,7 @@ pub fn run(
         );
     }
     if let Err(error) = Config::from_tmux(tmux) {
-        report.problem(format!("@tracon-order is invalid: {error}"));
+        report.problem(format!("a tracon option is invalid: {error}"));
     }
 
     check_claude(&mut report);
