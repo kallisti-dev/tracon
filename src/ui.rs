@@ -225,6 +225,8 @@ struct Picker<'a> {
     /// Indices into `entries` that match the filter, in list order.
     visible: Vec<usize>,
     filter: String,
+    /// Keys edit the filter rather than act on the list.
+    filtering: bool,
     list: ListState,
     preview: Text<'static>,
     preview_pane: Option<String>,
@@ -345,21 +347,31 @@ impl Picker<'_> {
             .scroll((scroll, 0));
         frame.render_widget(preview, preview_area);
 
-        let hint = self
-            .status
-            .clone()
-            .unwrap_or_else(|| "enter focus · tab pin · esc close".to_owned());
-        let input = Line::from(vec![
-            Span::raw("> ").bold(),
-            Span::raw(self.filter.clone()),
-            Span::raw("  "),
-            Span::raw(hint).dim(),
-        ]);
+        let hint = self.status.clone().unwrap_or_else(|| {
+            if self.filtering {
+                "enter focus · esc clear"
+            } else {
+                "enter focus · p pin · / filter · esc close"
+            }
+            .to_owned()
+        });
+        let input = if self.filtering {
+            Line::from(vec![
+                Span::raw("/").bold(),
+                Span::raw(self.filter.clone()),
+                Span::raw("  "),
+                Span::raw(hint).dim(),
+            ])
+        } else {
+            Line::from(Span::raw(hint).dim())
+        };
         frame.render_widget(Paragraph::new(input), input_area);
-        frame.set_cursor_position((
-            input_area.x + 2 + self.filter.chars().count() as u16,
-            input_area.y,
-        ));
+        if self.filtering {
+            frame.set_cursor_position((
+                input_area.x + 1 + self.filter.chars().count() as u16,
+                input_area.y,
+            ));
+        }
     }
 
     /// Handle a key, returning whether the picker should close: a pane was
@@ -367,7 +379,6 @@ impl Picker<'_> {
     fn key(&mut self, key: KeyEvent) -> Result<bool> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => return Ok(true),
             KeyCode::Char('c' | 'g') if control => return Ok(true),
             KeyCode::Enter => {
                 if let Some(entry) = self.selected() {
@@ -381,17 +392,37 @@ impl Picker<'_> {
                     }
                 }
             }
-            KeyCode::Tab => {
+            KeyCode::Up => self.move_selection(-1),
+            KeyCode::Down => self.move_selection(1),
+            KeyCode::Char('p' | 'k') if control => self.move_selection(-1),
+            KeyCode::Char('n' | 'j') if control => self.move_selection(1),
+            _ if self.filtering => self.filter_key(key.code, control),
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
+            KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Char('p') => {
                 if let Some(entry) = self.selected() {
                     let (pane, pinned) = (entry.pane.clone(), entry.pinned);
                     self.store.set_pinned(&pane, !pinned)?;
                     self.reload()?;
                 }
             }
-            KeyCode::Up => self.move_selection(-1),
-            KeyCode::Down => self.move_selection(1),
-            KeyCode::Char('p' | 'k') if control => self.move_selection(-1),
-            KeyCode::Char('n' | 'j') if control => self.move_selection(1),
+            KeyCode::Char('/') => self.filtering = true,
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn filter_key(&mut self, code: KeyCode, control: bool) {
+        match code {
+            // Back to the whole list, still on the chosen pane.
+            KeyCode::Esc => {
+                let selected = self.selected().map(|entry| entry.pane.clone());
+                self.filtering = false;
+                self.filter.clear();
+                self.refilter(selected);
+            }
+            KeyCode::Backspace if self.filter.is_empty() => self.filtering = false,
             KeyCode::Char('u') if control => {
                 self.filter.clear();
                 self.refilter(None);
@@ -406,7 +437,6 @@ impl Picker<'_> {
             }
             _ => {}
         }
-        Ok(false)
     }
 }
 
@@ -425,6 +455,7 @@ pub fn pick(
         entries: Vec::new(),
         visible: Vec::new(),
         filter: String::new(),
+        filtering: false,
         list: ListState::default(),
         preview: Text::default(),
         preview_pane: None,

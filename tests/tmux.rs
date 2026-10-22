@@ -732,6 +732,25 @@ fn the_picker_lists_previews_and_focuses() {
             .then_some(screen)
     });
     assert!(screen.contains("agents:0.0"), "{screen}");
+
+    server.tmux(&["send-keys", "-t", &picker, "p"]);
+    wait_until("the pane is pinned", Duration::from_secs(10), || {
+        (server.option(&agent, "@tracon_pinned") == "1").then_some(())
+    });
+    server.tmux(&["send-keys", "-t", &picker, "/nomatch"]);
+    wait_until("the filter hides the pane", Duration::from_secs(10), || {
+        let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
+        (screen.contains("/nomatch") && !screen.contains("agents:0.0")).then_some(())
+    });
+    server.tmux(&["send-keys", "-t", &picker, "Escape"]);
+    wait_until(
+        "clearing the filter shows it",
+        Duration::from_secs(10),
+        || {
+            let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
+            screen.contains("agents:0.0").then_some(())
+        },
+    );
     server.tmux(&["send-keys", "-t", &picker, "Enter"]);
     wait_until("the client moves", Duration::from_secs(10), || {
         (server.shows(&client) == format!("agents {agent}")).then_some(())

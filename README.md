@@ -80,12 +80,14 @@ with a live preview of the selected pane below the list.
 
 | Key | Action |
 | --- | --- |
-| typing | Filter the list (fuzzy) |
-| Up, Down, Ctrl-p, Ctrl-n | Move the selection |
+| Up, Down, j, k, Ctrl-p, Ctrl-n | Move the selection |
 | Enter | Focus the pane, in whatever session it is |
-| Tab | Pin or unpin the pane |
-| Ctrl-u | Clear the filter |
-| Esc | Close |
+| p | Pin or unpin the pane |
+| / | Filter the list (fuzzy) as you type |
+| q, Esc | Close |
+
+While filtering, the arrow keys, Ctrl-p, Ctrl-n and Enter work as above,
+Ctrl-u clears the filter, and Esc clears it and returns to the list.
 
 When no pane runs an agent, the key shows a message instead.
 
