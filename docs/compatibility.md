@@ -55,6 +55,13 @@ session while it sits idle, about 50 minutes after the turn ends, and prints
 the routine `/compact` uses, so the same events should fire; in four sessions
 seen on 2026-10-21, a hook ran as the compaction began and no `Stop` followed.
 
+With Claude Code 2.1.309 on 2026-10-23, cancelling a prompt before Claude
+replied, with Esc (twice in vim mode) or Ctrl-C, fired only
+`UserPromptSubmit`. The prompt disappeared from the conversation and its
+text went back into the input box, with no interrupt notice, so the last
+turn shown was the one before, ending in its `✻ Baked for 4s · done 5:55 PM`
+line.
+
 ## Blind spots
 
 - **Interrupts and bare refusals.** Esc, Ctrl-C and "No" without a comment
@@ -62,12 +69,16 @@ seen on 2026-10-21, a hook ran as the compaction began and no `Stop` followed.
   stays `waiting` or `working`. tracon lists the pane as `idle` while
   Claude Code's interrupt notice is on screen; see
   [screen reading](design.md#screen-reading).
+- **Cancelled prompts.** A prompt cancelled before Claude replies fires
+  `UserPromptSubmit` and nothing after it, so the record stays `working`.
+  tracon lists the pane as `idle` while the last turn on screen has ended.
 - **Approval lag.** Nothing fires when a prompt is approved, so the record
   stays `waiting.permission` until the tool finishes. tracon lists such a pane
   as `working` while its screen shows Claude Code's spinner line and no dialog.
-- **Screen text.** Both corrections match text Claude Code 2.1.300 draws. If a
-  later version draws it differently, the pane shows its recorded state, as
-  above, until the next hook; the preview shows the truth.
+- **Screen text.** The corrections match text Claude Code draws, checked
+  with 2.1.300 and, for cancelled prompts, 2.1.309. If a later version draws
+  it differently, the pane shows its recorded state, as above, until the next
+  hook; the preview shows the truth.
 - **Sessions started before the plugin loaded** have no hooks and are listed
   as `unknown` until restarted.
 - **A crashed agent** that never ran SessionEnd leaves its last state on the

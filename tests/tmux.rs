@@ -579,12 +579,17 @@ fn focusing_a_finished_pane_marks_it_seen() {
 }
 
 #[test]
-fn waiting_panes_are_listed_from_what_their_screen_shows() {
+fn stale_panes_are_listed_from_what_their_screen_shows() {
     let server = Server::start();
     let refused = server.new_window("work");
+    let cancelled = server.new_window("work");
     for pane in ["%0", &refused] {
         server.hook(pane, event("PermissionRequest", bash(None)));
     }
+    server.hook(
+        &cancelled,
+        event("UserPromptSubmit", json!({ "prompt": "a" })),
+    );
     // `✶ Kerfuffling… (21s · ↓ 109 tokens)`, coloured as Claude Code draws
     // it. Octal escapes keep the typed line ASCII, which the shell reads
     // intact without a UTF-8 locale, as in the Nix sandbox.
@@ -595,24 +600,44 @@ fn waiting_panes_are_listed_from_what_their_screen_shows() {
         r"printf '\033[38;5;174m\342\234\266 Kerfuffling\342\200\246\033[0m (21s \302\267 \342\206\223 109 tokens)\n'",
         "Enter",
     ]);
-    let screen = Path::new(ROOT).join("tests/screens/claude-2.1.300/refused-esc.txt");
-    server.tmux(&[
-        "send-keys",
-        "-t",
-        &refused,
-        &format!("cat '{}'", screen.display()),
-        "Enter",
-    ]);
+    for (pane, screen) in [
+        (&refused, "claude-2.1.300/refused-esc.txt"),
+        (&cancelled, "claude-2.1.309/cancelled-esc.txt"),
+    ] {
+        let screen = Path::new(ROOT).join("tests/screens").join(screen);
+        server.tmux(&[
+            "send-keys",
+            "-t",
+            pane,
+            &format!("cat '{}'", screen.display()),
+            "Enter",
+        ]);
+    }
     let pane = |id: &str, state: &str| (id.to_owned(), state.to_owned());
+    let expected = [
+        pane("%0", "working"),
+        pane(&refused, "idle"),
+        pane(&cancelled, "idle"),
+    ];
     wait_until(
         "the panes are listed from their screens",
         Duration::from_secs(10),
-        || (server.listed() == [pane("%0", "working"), pane(&refused, "idle")]).then_some(()),
+        || {
+            let mut listed = server.listed();
+            listed.sort();
+            (listed == expected).then_some(())
+        },
     );
     let list = server.list();
-    assert_eq!(list[0]["sighting"], "working");
-    assert_eq!(list[1]["sighting"], "interrupted");
+    let sighting = |id: &str| {
+        let entry = list.iter().find(|entry| entry["pane"]["id"] == id).unwrap();
+        entry["sighting"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(sighting("%0"), "working");
+    assert_eq!(sighting(&refused), "interrupted");
+    assert_eq!(sighting(&cancelled), "finished");
     assert_eq!(server.state("%0"), "waiting.permission");
+    assert_eq!(server.state(&cancelled), "working");
 }
 
 #[test]

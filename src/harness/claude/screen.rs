@@ -15,16 +15,21 @@ const DIALOG_MARKERS: [&str; 4] = [
     "no, and tell claude what to do differently",
 ];
 
-/// A dialog outranks a spinner, and a spinner outranks an interrupt notice
+/// A dialog outranks a spinner, and a spinner outranks what an earlier turn
 /// left above a prompt that is still being worked on.
 pub fn read(text: &str) -> Option<Sighting> {
     let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
     if dialog(&lines) {
-        Some(Sighting::Prompt)
-    } else if lines.iter().any(|line| spinner(line)) {
-        Some(Sighting::Working)
-    } else if interrupted(&lines) {
+        return Some(Sighting::Prompt);
+    }
+    if lines.iter().any(|line| spinner(line)) {
+        return Some(Sighting::Working);
+    }
+    let turn = latest_turn(&lines)?;
+    if turn.iter().any(|line| interrupted(line)) {
         Some(Sighting::Interrupted)
+    } else if turn.iter().any(|line| finished(line)) {
+        Some(Sighting::Finished)
     } else {
         None
     }
@@ -64,22 +69,50 @@ fn spinner(line: &str) -> bool {
 }
 
 /// The notice a refused prompt or an interrupt leaves, `⎿  Interrupted ·
-/// What should Claude do instead?`, in the latest turn: below the last
-/// prompt sent and above the input box.
-fn interrupted(lines: &[&str]) -> bool {
-    let Some(input) = input_box(lines) else {
+/// What should Claude do instead?`.
+fn interrupted(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix('⎿')
+        .is_some_and(|rest| rest.trim_start().starts_with("Interrupted"))
+}
+
+/// The line a finished turn leaves at the start of a row, a glyph, a verb and
+/// how long the turn took, as in `✻ Crunched for 28s · done 9:19 PM`.
+fn finished(line: &str) -> bool {
+    let mut chars = line.chars();
+    if !chars.next().is_some_and(|c| SPINNER_GLYPHS.contains(&c)) {
+        return false;
+    }
+    let Some((verb, rest)) = chars
+        .as_str()
+        .strip_prefix(' ')
+        .and_then(|rest| rest.split_once(" for "))
+    else {
         return false;
     };
-    let turn = &lines[..input];
+    let Some((duration, end)) = rest.split_once(" · ") else {
+        return false;
+    };
+    !verb.is_empty()
+        && verb.chars().all(char::is_alphabetic)
+        && duration.split(' ').all(|part| {
+            part.strip_suffix(['h', 'm', 's']).is_some_and(|number| {
+                !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
+            })
+        })
+        && end.starts_with("done")
+}
+
+/// The latest turn: the rows below the last prompt sent and above the input
+/// box. A prompt cancelled before Claude replied leaves no row, so the turn
+/// before it is the latest.
+fn latest_turn<'a>(lines: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let turn = &lines[..input_box(lines)?];
     let start = turn
         .iter()
         .rposition(|line| line.starts_with('❯'))
         .map_or(0, |index| index + 1);
-    turn[start..].iter().any(|line| {
-        line.trim_start()
-            .strip_prefix('⎿')
-            .is_some_and(|rest| rest.trim_start().starts_with("Interrupted"))
-    })
+    Some(&turn[start..])
 }
 
 /// The row of the input box's top border: a rule directly above a line that
@@ -101,16 +134,21 @@ mod tests {
     use super::*;
 
     macro_rules! screen {
-        ($name:literal) => {
+        ($version:literal, $name:literal) => {
             (
                 $name,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/tests/screens/claude-2.1.300/",
+                    "/tests/screens/claude-",
+                    $version,
+                    "/",
                     $name,
                     ".txt"
                 )),
             )
+        };
+        ($name:literal) => {
+            screen!("2.1.300", $name)
         };
     }
 
@@ -126,7 +164,15 @@ mod tests {
             (screen!("refused-no"), Some(Sighting::Interrupted)),
             (screen!("interrupted-esc"), Some(Sighting::Interrupted)),
             (screen!("interrupted-ctrl-c"), Some(Sighting::Interrupted)),
-            (screen!("finished"), None),
+            (screen!("finished"), Some(Sighting::Finished)),
+            (
+                screen!("2.1.309", "cancelled-esc"),
+                Some(Sighting::Finished),
+            ),
+            (
+                screen!("2.1.309", "cancelled-ctrl-c"),
+                Some(Sighting::Finished),
+            ),
         ];
         for ((name, text), expected) in cases {
             assert_eq!(read(text), expected, "{name}");
@@ -138,6 +184,26 @@ mod tests {
         let (_, dialog) = screen!("dialog");
         let both = format!("✶ Kerfuffling… (3s · ↓ 9 tokens)\n{dialog}");
         assert_eq!(read(&both), Some(Sighting::Prompt));
+    }
+
+    #[test]
+    fn finished_turn_lines_are_recognised() {
+        for line in [
+            "✻ Crunched for 28s · done 9:19 PM",
+            "✻ Churned for 2m 27s · done 4:15 PM",
+            "✻ Sautéed for 1h 2m 5s · done 11:02 AM",
+        ] {
+            assert!(finished(line), "{line}");
+        }
+        for line in [
+            "  ✻ Crunched for 28s · done 9:19 PM",
+            "✻ Crunched for a while · done 9:19 PM",
+            "✻ Crunched for 28s",
+            "✢ Moseying… (1m 5s · ↑ 2.1k tokens)",
+            "Waited for 28s · done 9:19 PM",
+        ] {
+            assert!(!finished(line), "{line}");
+        }
     }
 
     #[test]

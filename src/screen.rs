@@ -1,10 +1,11 @@
 //! What a pane's screen shows, for states that change without a hook.
 //!
 //! Hooks are the only writers of state, but some changes fire none: Claude
-//! Code reports neither an approved prompt nor an interrupt. The list reads
-//! the plain-text screen of each pane in a state that can go stale, its
-//! harness says what it recognises there ([`Harness::read_screen`]), and
-//! [`correct`] decides what the list shows instead. Nothing is written back.
+//! Code reports neither an approved prompt, nor an interrupt, nor a prompt
+//! cancelled before it replied. The list reads the plain-text screen of each
+//! pane in a state that can go stale, its harness says what it recognises
+//! there ([`Harness::read_screen`]), and [`correct`] decides what the list
+//! shows instead. Nothing is written back.
 //! Every correction needs a sighting, so a screen the harness doesn't
 //! recognise leaves the recorded state.
 //!
@@ -24,6 +25,8 @@ pub enum Sighting {
     /// The user refused a prompt or interrupted the agent, which now waits
     /// for input.
     Interrupted,
+    /// The latest turn on screen has ended and no prompt has followed it.
+    Finished,
 }
 
 /// Whether a pane in `state` can change without a hook, so its screen is
@@ -42,7 +45,7 @@ pub fn correct(state: &State, sighting: Sighting) -> Option<State> {
         Sighting::Working if state.is_under(&State::known(State::WAITING)) => {
             Some(State::known(State::WORKING))
         }
-        Sighting::Interrupted => Some(State::known(State::IDLE)),
+        Sighting::Interrupted | Sighting::Finished => Some(State::known(State::IDLE)),
         _ => None,
     }
 }
@@ -61,11 +64,18 @@ mod tests {
         assert_eq!(corrected("waiting.permission", Sighting::Working), working);
         assert_eq!(corrected("waiting.question", Sighting::Interrupted), idle);
         assert_eq!(corrected("working", Sighting::Interrupted), idle);
+        assert_eq!(corrected("working", Sighting::Finished), idle);
+        assert_eq!(corrected("waiting.permission", Sighting::Finished), idle);
         assert_eq!(corrected("waiting.permission", Sighting::Prompt), None);
         assert_eq!(corrected("working", Sighting::Prompt), None);
         assert_eq!(corrected("working", Sighting::Working), None);
         for state in ["working.background", "done", "idle", "error", "unknown"] {
-            for sighting in [Sighting::Prompt, Sighting::Working, Sighting::Interrupted] {
+            for sighting in [
+                Sighting::Prompt,
+                Sighting::Working,
+                Sighting::Interrupted,
+                Sighting::Finished,
+            ] {
                 assert_eq!(corrected(state, sighting), None, "{state} {sighting:?}");
             }
         }

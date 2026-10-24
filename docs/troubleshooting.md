@@ -65,7 +65,8 @@ pane, as inside a nested multiplexer. Restart the session in this pane.
 ## A pane shows the wrong state
 
 Claude Code reports nothing when you approve a prompt, interrupt it, press
-Esc at a prompt, or answer "No" without a comment. tracon covers those by
+Esc at a prompt, answer "No" without a comment, or cancel a prompt before
+Claude replies. tracon covers those by
 reading the screen, and if a Claude Code update changed the text it reads,
 the pane keeps its last state until your next prompt. See
 [compatibility](compatibility.md#blind-spots). To inspect what a pane
