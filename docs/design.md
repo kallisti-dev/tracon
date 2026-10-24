@@ -66,7 +66,7 @@ events through the tmux store and compare each step with it.
 | Event | Change | Condition |
 | --- | --- | --- |
 | `SessionStart` (not after compaction) | `idle`, record the session | always |
-| `UserPromptSubmit` | `working`, with the prompt as message | always |
+| `UserPromptSubmit` | `working`, with the prompt as message | always; for a background task's notification, no subagent waits |
 | `PreToolUse` for `AskUserQuestion` or `ExitPlanMode` | `waiting.question` | always |
 | `PermissionRequest` | `waiting.question` for those tools, otherwise `waiting.permission` | always |
 | `Elicitation` | `waiting.question` | always |
@@ -82,8 +82,11 @@ Subagent events carry `agent_id`. A subagent's permission prompt still shows
 in the pane, so it raises a wait like the main agent's, and the store records
 the subagent as the wait's owner. The main agent's tool and turn events then
 leave the wait alone, and only that subagent's own tool events or its
-`SubagentStop` end it. A new prompt ends any wait, because a prompt can't be
-typed while one is on screen.
+`SubagentStop` end it. A prompt the user typed ends any wait, because none
+can be typed while a dialog is on screen. A background task's result reaches
+the main agent as a prompt too, its text starting `<task-notification>`,
+while another subagent's dialog may still be open; it counts as main-agent
+progress.
 
 The permission notification repeats PermissionRequest about six seconds
 later, and also follows AskUserQuestion and ExitPlanMode, so it only raises a

@@ -83,6 +83,18 @@ fn unless_waiting() -> Cond {
     Cond::negated(Cond::StateUnder(State::known(State::WAITING)))
 }
 
+/// The summary of a background task's notification, which Claude Code
+/// delivers to the main agent as a prompt, or the whole notice without one.
+fn task_notification(prompt: &str) -> Option<&str> {
+    let notice = prompt.trim_start().strip_prefix("<task-notification>")?;
+    Some(
+        notice
+            .split_once("<summary>")
+            .and_then(|(_, rest)| rest.split_once("</summary>"))
+            .map_or(notice, |(summary, _)| summary),
+    )
+}
+
 impl Harness for Claude {
     fn name(&self) -> &'static str {
         "claude"
@@ -136,13 +148,24 @@ impl Harness for Claude {
                     Cond::Session(session.to_owned()),
                 ))
             }
-            // A subagent's turn has no prompt of its own; the main agent's
-            // UserPromptSubmit covers notifications from background tasks.
+            // A subagent's turn has no prompt of its own. A background task's
+            // result reaches the main agent as a prompt too, possibly while
+            // another subagent's dialog is on screen, so it counts as
+            // progress rather than as a prompt the user typed.
             "UserPromptSubmit" if agent.is_none() => {
+                let prompt = text(payload, "prompt").unwrap_or("");
                 let mut update = set(State::WORKING);
-                update.message = message(text(payload, "prompt").unwrap_or(""));
-                update.agent = Field::Clear;
-                guarded(update, Cond::Always)
+                match task_notification(prompt) {
+                    Some(notice) => {
+                        update.message = message(notice);
+                        guarded(update, unless_a_subagent_waits())
+                    }
+                    None => {
+                        update.message = message(prompt);
+                        update.agent = Field::Clear;
+                        guarded(update, Cond::Always)
+                    }
+                }
             }
             // PermissionRequest also fires for these tools; PreToolUse is
             // kept for modes that skip the permission check.
@@ -416,6 +439,51 @@ mod tests {
         answered.push(event("UserPromptSubmit"));
         answered.push(with(event("Stop"), json!({ "background_tasks": [] })));
         assert_eq!(state(&replay(&answered)), "done");
+    }
+
+    #[test]
+    fn a_task_notification_leaves_a_subagent_wait() {
+        // Another background task finished while this subagent's dialog was
+        // on screen; its result reached the main agent as a prompt.
+        let notice = "<task-notification>\n<task-id>ac071dbfef3cabe24</task-id>\n\
+            <status>completed</status>\n<summary>Agent \"Research timeouts\" \
+            completed</summary>\n</task-notification>";
+        let sub = |name: &str| {
+            with(
+                event(name),
+                with(bash(), json!({ "agent_id": "a8653202ef4b8a225" })),
+            )
+        };
+        let record = replay(&[
+            event("UserPromptSubmit"),
+            sub("PermissionRequest"),
+            with(
+                event("SubagentStop"),
+                json!({ "agent_id": "ac071dbfef3cabe24" }),
+            ),
+            with(event("UserPromptSubmit"), json!({ "prompt": notice })),
+            with(event("PostToolUse"), bash()),
+            with(
+                event("Stop"),
+                json!({ "background_tasks": [{ "id": "a8653202ef4b8a225" }] }),
+            ),
+        ]);
+        assert_eq!(state(&record), "waiting.permission");
+        assert_eq!(record.agent.as_deref(), Some("a8653202ef4b8a225"));
+
+        // With no dialog on screen it starts a turn, like any prompt.
+        let record = replay(&[
+            with(
+                event("Stop"),
+                json!({ "background_tasks": [{ "id": "a" }] }),
+            ),
+            with(event("UserPromptSubmit"), json!({ "prompt": notice })),
+        ]);
+        assert_eq!(state(&record), "working");
+        assert_eq!(
+            record.message.as_deref(),
+            Some("Agent \"Research timeouts\" completed")
+        );
     }
 
     #[test]

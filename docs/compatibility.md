@@ -34,6 +34,8 @@ every hook event from a real session in a tmux pane:
 | That subagent asks permission | `PreToolUse` and `PermissionRequest` with its `agent_id`, then the notification without one |
 | After approving it | the subagent's `PostToolUse`, `PostToolBatch` and `SubagentStop`, then a main-agent `UserPromptSubmit` and `Stop` as Claude takes its result |
 | `/compact` after a turn | `PreCompact` with trigger `manual`, `SubagentStop` with the compacting subagent's `agent_id`, `SessionStart` with source `compact`, `PostCompact`; no `Stop` |
+| A background agent finishes | its `SubagentStop`, then a main-agent `UserPromptSubmit` whose `prompt` is the `<task-notification>` text, and `Stop` |
+| An `ask` rule prompts under `--dangerously-skip-permissions` | `PreToolUse`, `PermissionRequest` and the notification, as in default mode; also for a background agent's command |
 
 No `idle_prompt` notification arrived within 70 seconds of a bare "No".
 While an approved command ran (checked on 2026-10-21), nothing was written to
