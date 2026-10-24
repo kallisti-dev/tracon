@@ -1,4 +1,5 @@
-//! Register tracon with a tmux server: the picker key and the focus hook.
+//! Register tracon with a tmux server: the picker key, the focus hook and
+//! the option mirror.
 //!
 //! Setup is idempotent and reversible, and serialised with `wait-for -L` so
 //! concurrent reloads don't interleave. Every registered command checks that
@@ -7,6 +8,7 @@
 
 use std::path::Path;
 
+use super::mirror::PID_OPTION;
 use crate::Error;
 use crate::tmux::{self, Tmux};
 
@@ -28,6 +30,25 @@ const FOCUS_SLOT: u32 = 80;
 /// another path.
 const SEEN_MARKER: &str = "tracon seen";
 const POPUP_MARKER: &str = "tracon popup";
+
+/// The mirror's process id, when one is recorded and the process runs.
+fn mirror_pid(tmux: &Tmux) -> Result<Option<u32>, Error> {
+    let pid = tmux.global_option(PID_OPTION)?;
+    Ok(pid.trim().parse::<u32>().ok().filter(|&pid| {
+        // SAFETY: signal 0 checks for the process without sending anything.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }))
+}
+
+/// End the mirror this server recorded, if it still runs.
+fn stop_mirror(tmux: &Tmux) -> Result<(), Error> {
+    if let Some(pid) = mirror_pid(tmux)? {
+        // SAFETY: the pid was recorded by a mirror of this server.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    tmux.run(["set-option", "-gu", PID_OPTION])?;
+    Ok(())
+}
 
 struct Lock<'a>(&'a Tmux);
 
@@ -135,6 +156,13 @@ pub fn install(tmux: &Tmux, binary: &Path, dir: Option<&Path>, version: &str) ->
         ),
     ])?;
 
+    // A mirror from another binary keeps running old code; the lock stops
+    // a second mirror of the same one.
+    if tmux.global_option(BIN)? != binary.to_string_lossy() {
+        stop_mirror(tmux)?;
+    }
+    tmux.run(["run-shell", "-b", &guarded(binary, "mirror")])?;
+
     tmux.run(["set-option", "-g", BOUND_KEY, &key])?;
     tmux.run(["set-option", "-g", BIN, &binary.to_string_lossy()])?;
     tmux.run(["set-option", "-g", VERSION, version])?;
@@ -150,6 +178,7 @@ pub fn remove(tmux: &Tmux) -> Result<(), Error> {
     let _lock = Lock::take(tmux)?;
     unbind_if_ours(tmux, &tmux.global_option(BOUND_KEY)?)?;
     remove_focus_hooks(tmux)?;
+    stop_mirror(tmux)?;
     for option in [BOUND_KEY, BIN, VERSION, DIR] {
         tmux.run(["set-option", "-gu", option])?;
     }
@@ -166,6 +195,8 @@ pub struct Installed {
     /// The key's binding still opens the picker.
     pub key_bound: bool,
     pub focus_hook: bool,
+    /// The option mirror runs.
+    pub mirror: bool,
 }
 
 pub fn installed(tmux: &Tmux) -> Result<Installed, Error> {
@@ -179,6 +210,7 @@ pub fn installed(tmux: &Tmux) -> Result<Installed, Error> {
         focus_hook: hook_entries(tmux, FOCUS_HOOK)?
             .iter()
             .any(|(_, command)| command.contains(SEEN_MARKER)),
+        mirror: mirror_pid(tmux)?.is_some(),
     })
 }
 

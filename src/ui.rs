@@ -1,9 +1,11 @@
 //! The picker: the ordered list, a live preview of the selected pane, and a
-//! fuzzy filter. It reads the list and calls commands like any front end.
+//! fuzzy filter. It reads the list and calls commands like any front end,
+//! and redraws when the event socket reports a change.
 
-use std::process::{Child, Stdio};
+use std::io::BufRead;
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,11 +20,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
-use tracon::backend::{Backend, TmuxBackend};
-use tracon::list::{self, Entry};
-use tracon::store::{Store, TmuxStore};
-use tracon::tmux::{CHANNEL, Tmux};
-use tracon::{Config, State, harness};
+use tracon::client::Client;
+use tracon::list::Entry;
+use tracon::protocol::{self, Env, SettingsResult};
+use tracon::runtime::Runtime;
+use tracon::{Locator, State};
 
 /// The longest the picker waits for a key before checking for changes.
 const TICK: Duration = Duration::from_millis(100);
@@ -134,66 +136,31 @@ fn trim_capture(capture: &str) -> String {
     lines[..end].join("\n")
 }
 
-/// Runs `tmux wait-for tracon` in a loop and reports each signal. Dropping
-/// the watcher kills the waiting tmux client, which would otherwise outlive
-/// the picker until the next signal.
-struct Watcher {
-    waiting: Arc<Mutex<Waiting>>,
+/// Reads the event socket on a thread and reports each message; the
+/// picker reloads the list on any. Dropping it closes the socket.
+struct Events {
+    stream: Option<UnixStream>,
     signals: Receiver<()>,
 }
 
-#[derive(Default)]
-struct Waiting {
-    closed: bool,
-    child: Option<Child>,
-}
-
-impl Watcher {
-    fn start(tmux: &Tmux) -> Self {
-        let waiting = Arc::new(Mutex::new(Waiting::default()));
+impl Events {
+    fn start(runtime: &Runtime) -> Self {
         let (sender, signals) = mpsc::channel();
-        let shared = Arc::clone(&waiting);
-        let tmux = tmux.clone();
+        let Ok(reader) = Client::subscribe(runtime) else {
+            return Events {
+                stream: None,
+                signals,
+            };
+        };
+        let stream = reader.get_ref().try_clone().ok();
         thread::spawn(move || {
-            loop {
-                let Ok(mut child) = tmux
-                    .command()
-                    .args(["wait-for", CHANNEL])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                else {
-                    return;
-                };
-                match shared.lock() {
-                    Ok(mut state) if !state.closed => state.child = Some(child),
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return;
-                    }
-                }
-                // Poll rather than block in wait, so the child stays where
-                // Drop can kill it.
-                loop {
-                    thread::sleep(Duration::from_millis(50));
-                    let Ok(mut state) = shared.lock() else { return };
-                    match state.child.as_mut().map(Child::try_wait) {
-                        Some(Ok(Some(_))) => {
-                            state.child = None;
-                            break;
-                        }
-                        Some(Ok(None)) => {}
-                        _ => return,
-                    }
-                }
-                if sender.send(()).is_err() {
+            for line in reader.lines() {
+                if line.is_err() || sender.send(()).is_err() {
                     return;
                 }
             }
         });
-        Watcher { waiting, signals }
+        Events { stream, signals }
     }
 
     fn signalled(&self) -> bool {
@@ -205,22 +172,18 @@ impl Watcher {
     }
 }
 
-impl Drop for Watcher {
+impl Drop for Events {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.waiting.lock() {
-            state.closed = true;
-            if let Some(mut child) = state.child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        if let Some(stream) = &self.stream {
+            let _ = stream.shutdown(Shutdown::Both);
         }
     }
 }
 
 struct Picker<'a> {
-    backend: &'a TmuxBackend,
-    store: &'a TmuxStore,
-    config: &'a Config,
+    rpc: Client,
+    env: Env,
+    preview_interval: Duration,
     client: Option<&'a str>,
     entries: Vec<Entry>,
     /// Indices into `entries` that match the filter, in list order.
@@ -230,7 +193,7 @@ struct Picker<'a> {
     filtering: bool,
     list: ListState,
     preview: Text<'static>,
-    preview_pane: Option<String>,
+    preview_pane: Option<Locator>,
     status: Option<String>,
     matcher: Matcher,
 }
@@ -238,11 +201,10 @@ struct Picker<'a> {
 impl Picker<'_> {
     fn reload(&mut self) -> Result<()> {
         let selected = self.selected().map(|entry| entry.pane.clone());
-        let records = self.store.load()?;
-        let panes = self.backend.panes()?;
-        self.entries = list::entries(panes, records, &harness::all(), self.config, |pane| {
-            self.backend.text(pane).ok()
-        });
+        let params = protocol::List {
+            env: self.env.clone(),
+        };
+        self.entries = self.rpc.call("list", params)?;
         self.refilter(selected);
         Ok(())
     }
@@ -297,13 +259,17 @@ impl Picker<'_> {
             self.preview_pane = None;
             return;
         };
-        let capture = self.backend.capture(&pane).unwrap_or_default();
+        let params = protocol::Capture {
+            pane: pane.clone(),
+            plain: false,
+        };
+        let capture: String = self.rpc.call("capture", params).unwrap_or_default();
         let capture = trim_capture(&capture);
         self.preview = capture
             .as_bytes()
             .into_text()
             .unwrap_or_else(|_| Text::raw(capture));
-        self.preview_pane = Some(pane.id);
+        self.preview_pane = Some(pane);
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -385,8 +351,12 @@ impl Picker<'_> {
             KeyCode::Char('c' | 'g') if control => return Ok(true),
             KeyCode::Enter => {
                 if let Some(entry) = self.selected() {
-                    let pane = entry.pane.clone();
-                    match self.backend.focus(&pane, self.client) {
+                    let params = protocol::Focus {
+                        pane: entry.pane.to_string(),
+                        client: self.client.map(str::to_owned),
+                        env: self.env.clone(),
+                    };
+                    match self.rpc.call::<()>("focus", params) {
                         Ok(()) => return Ok(true),
                         Err(error) => {
                             self.status = Some(error.to_string());
@@ -405,8 +375,12 @@ impl Picker<'_> {
             KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Char('p') => {
                 if let Some(entry) = self.selected() {
-                    let (pane, pinned) = (entry.pane.clone(), entry.pinned);
-                    self.store.set_pinned(&pane, !pinned)?;
+                    let params = protocol::Pin {
+                        pane: Some(entry.pane.to_string()),
+                        pinned: !entry.pinned,
+                        env: self.env.clone(),
+                    };
+                    self.rpc.call::<()>("pin", params)?;
                     self.reload()?;
                 }
             }
@@ -443,17 +417,14 @@ impl Picker<'_> {
     }
 }
 
-pub fn pick(
-    tmux: &Tmux,
-    backend: &TmuxBackend,
-    store: &TmuxStore,
-    config: &Config,
-    client: Option<&str>,
-) -> Result<()> {
+pub fn pick(runtime: &Runtime, client: Option<&str>) -> Result<()> {
+    let env = protocol::env();
+    let mut rpc = Client::connect(runtime)?;
+    let settings: SettingsResult = rpc.call("settings", protocol::Settings { env: env.clone() })?;
     let mut picker = Picker {
-        backend,
-        store,
-        config,
+        rpc,
+        env,
+        preview_interval: Duration::from_millis(settings.preview_interval_ms),
         client,
         entries: Vec::new(),
         visible: Vec::new(),
@@ -467,22 +438,18 @@ pub fn pick(
     };
     picker.reload()?;
     picker.refresh_preview();
-    let watcher = Watcher::start(tmux);
+    let events = Events::start(runtime);
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut picker, &watcher);
+    let result = event_loop(&mut terminal, &mut picker, &events);
     ratatui::restore();
-    drop(watcher);
+    drop(events);
     result
 }
 
-fn event_loop(
-    terminal: &mut DefaultTerminal,
-    picker: &mut Picker,
-    watcher: &Watcher,
-) -> Result<()> {
+fn event_loop(terminal: &mut DefaultTerminal, picker: &mut Picker, events: &Events) -> Result<()> {
     let mut last_list = Instant::now();
     let mut last_preview = Instant::now();
-    let preview_interval = picker.config.preview_interval;
+    let preview_interval = picker.preview_interval;
     loop {
         terminal.draw(|frame| picker.draw(frame))?;
         let wait = TICK.min(preview_interval.saturating_sub(last_preview.elapsed()));
@@ -493,12 +460,11 @@ fn event_loop(
         {
             return Ok(());
         }
-        if watcher.signalled() || last_list.elapsed() >= LIST_INTERVAL {
+        if events.signalled() || last_list.elapsed() >= LIST_INTERVAL {
             picker.reload()?;
             last_list = Instant::now();
         }
-        let moved =
-            picker.selected().map(|entry| entry.pane.id.as_str()) != picker.preview_pane.as_deref();
+        let moved = picker.selected().map(|entry| &entry.pane) != picker.preview_pane.as_ref();
         if moved || last_preview.elapsed() >= preview_interval {
             picker.refresh_preview();
             last_preview = Instant::now();

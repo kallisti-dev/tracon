@@ -1,13 +1,19 @@
 //! tracon: terminal approach control for coding agents.
 //!
-//! Harness adapters turn hook payloads into guarded state changes, a store
-//! keeps the state per pane, and backends find, focus and capture panes.
-//! Front ends read the ordered list and call commands; none is privileged.
+//! Harness adapters turn hook payloads into guarded state changes, the
+//! daemon keeps the state per pane and publishes changes, and backends find,
+//! focus and capture panes. Front ends read the ordered list and call
+//! commands through the daemon's sockets; none is privileged.
 
 pub mod backend;
+pub mod client;
 pub mod config;
+pub mod daemon;
 pub mod harness;
+pub mod journal;
 pub mod list;
+pub mod protocol;
+pub mod runtime;
 pub mod screen;
 pub mod state;
 pub mod store;
@@ -46,6 +52,17 @@ pub enum Error {
     Tmux { command: String, stderr: String },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    #[error("could not reach the tracon daemon at {path}: {source}")]
+    Daemon {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("another tracon daemon runs from {0}")]
+    DaemonRunning(String),
+    #[error(transparent)]
+    Rpc(#[from] protocol::RpcError),
 }
 
 /// Seconds since the Unix epoch.

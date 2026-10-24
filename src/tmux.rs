@@ -1,6 +1,8 @@
-//! Running tmux commands against the server named by `$TMUX`.
+//! Running tmux commands against one server: the one at a socket, or the one
+//! `$TMUX` names.
 
 use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::Error;
@@ -16,11 +18,16 @@ const PROGRAM: &str = match option_env!("TRACON_TMUX") {
 /// stores keep this character out of the values they write.
 pub const SEPARATOR: char = '\u{1f}';
 
-/// The `wait-for` channel signalled after every state change.
+/// The `wait-for` channel signalled after every state change, for scripts
+/// that block on it.
 pub const CHANNEL: &str = "tracon";
 
-#[derive(Clone, Debug, Default)]
-pub struct Tmux;
+/// A tmux server: the one at `socket`, or without one the server `$TMUX`
+/// names, as a process inside tmux sees it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tmux {
+    socket: Option<PathBuf>,
+}
 
 impl Tmux {
     /// Whether this process runs inside a tmux pane.
@@ -28,12 +35,36 @@ impl Tmux {
         std::env::var_os("TMUX").is_some_and(|value| !value.is_empty())
     }
 
-    pub fn command(&self) -> Command {
-        Command::new(PROGRAM)
+    /// The server this process runs in, from `$TMUX`.
+    pub fn from_env() -> Option<Self> {
+        socket_in(&std::env::var("TMUX").ok()?).map(Tmux::at)
     }
 
-    /// Run tmux with `args` and return its standard output. tmux finds the
-    /// server through `$TMUX`, so this works without a controlling terminal.
+    pub fn at(socket: impl Into<PathBuf>) -> Self {
+        Tmux {
+            socket: Some(socket.into()),
+        }
+    }
+
+    pub fn socket(&self) -> Option<&Path> {
+        self.socket.as_deref()
+    }
+
+    /// A tmux command line for this server. `-u` makes the client UTF-8
+    /// whatever the locale; otherwise tmux replaces control characters in
+    /// its output, the field separator among them.
+    pub fn command(&self) -> Command {
+        let mut command = Command::new(PROGRAM);
+        command.arg("-u");
+        if let Some(socket) = &self.socket {
+            command.arg("-S").arg(socket);
+        }
+        command
+    }
+
+    /// Run tmux with `args` and return its standard output. The server is
+    /// named on the command line or found through `$TMUX`, so this works
+    /// without a controlling terminal.
     pub fn run<I, S>(&self, args: I) -> Result<String, Error>
     where
         I: IntoIterator<Item = S>,
@@ -71,6 +102,12 @@ impl Tmux {
         let value = self.run(["show-options", "-gqv", name])?;
         Ok(value.strip_suffix('\n').unwrap_or(&value).to_owned())
     }
+}
+
+/// The socket path in a `$TMUX` value, which is `socket,pid,index`.
+pub fn socket_in(value: &str) -> Option<PathBuf> {
+    let socket = value.split(',').next().unwrap_or("");
+    (!socket.is_empty()).then(|| PathBuf::from(socket))
 }
 
 /// Quote `value` as one word in tmux's command language, for command lists
@@ -120,6 +157,23 @@ mod tests {
         );
         assert_eq!(shell_quote("a b'c"), r"'a b'\''c'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn the_socket_is_the_first_field_of_tmux() {
+        assert_eq!(
+            socket_in("/tmp/tmux-501/default,1234,0"),
+            Some(PathBuf::from("/tmp/tmux-501/default"))
+        );
+        assert_eq!(socket_in(""), None);
+        assert_eq!(
+            Tmux::at("/tmp/s").command().get_args().collect::<Vec<_>>(),
+            ["-u", "-S", "/tmp/s"]
+        );
+        assert_eq!(
+            Tmux::default().command().get_args().collect::<Vec<_>>(),
+            ["-u"]
+        );
     }
 
     #[test]

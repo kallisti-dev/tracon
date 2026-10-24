@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{Locator, PaneInfo};
 use crate::config::Config;
@@ -10,7 +10,7 @@ use crate::harness::Harness;
 use crate::screen::{self, Sighting};
 use crate::state::{Record, Standing, State, sort_by_priority};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub pane: Locator,
     pub location: String,
@@ -28,7 +28,7 @@ pub struct Entry {
     pub viewed: Option<u64>,
     /// What the harness recognised on the pane's screen, read for a state
     /// that can change without a hook; `state` already accounts for it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sighting: Option<Sighting>,
 }
 

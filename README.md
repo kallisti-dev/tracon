@@ -3,9 +3,9 @@
 Terminal approach control for coding agents.
 
 tracon tells you which of your terminal coding agents need you, and takes you
-there. Claude Code reports its state through hooks; tracon keeps that state
-on each tmux pane, and a popup picker lists the agent panes with the ones
-waiting for you first and the longest wait at the top.
+there. Claude Code reports its state through hooks; a small daemon keeps
+that state per tmux pane, and a popup picker lists the agent panes with the
+ones waiting for you first and the longest wait at the top.
 
 ## Requirements
 
@@ -126,6 +126,13 @@ tracon unpin [%3]
 
 `tracon` here is the binary recorded in the tmux option `@tracon-bin`.
 
+Every command talks to a daemon that starts on demand and keeps running
+until `tracon daemon --stop`; it lives in `$XDG_RUNTIME_DIR/tracon`, or
+`/tmp/tracon-<uid>`. For tmux status lines and scripts, the tmux plugin
+mirrors each pane's state into its options, `#{@tracon_state}` and the
+others listed in the [design](docs/design.md#mirror), and `tmux wait-for
+tracon` returns after every change.
+
 ## Configuration
 
 Set these tmux options. Set `@tracon-key` before the plugin loads; with Home
@@ -160,7 +167,8 @@ set -g @tracon-order 'pinned waiting error done working idle unknown'
 ## Development
 
 `nix develop`, or direnv with the included `.envrc`, provides the tools. The
-tests start real tmux servers on disposable sockets under `/tmp`:
+tests start real tmux servers on disposable sockets under `/tmp`, each with
+a daemon in a directory of its own:
 
 ```sh
 cargo test

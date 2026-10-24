@@ -11,11 +11,11 @@
 //!
 //! [`Harness::read_screen`]: crate::harness::Harness::read_screen
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::State;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sighting {
     /// A prompt for the user is open.

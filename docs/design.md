@@ -1,17 +1,18 @@
 # Design
 
-tracon keeps one state per agent pane and lists panes in priority order. The
-core owns that state and exposes it through surfaces; the picker and every
-other front end only read the list and call commands.
+tracon keeps one state per agent pane and lists panes in priority order. A
+daemon owns that state and exposes it through two sockets; the command line,
+the picker and every other front end are clients of it.
 
 | Surface | Commands | Role |
 | --- | --- | --- |
 | Ingest | `tracon hook <harness>` | Harness adapters turn hook payloads into state changes |
-| Query | `tracon list [--json]` | The ordered list with each pane's state |
+| Query | `tracon list [--json]`, the event socket | The ordered list with each pane's state, and every change as it happens |
 | Command | `tracon focus`, `next`, `pin`, `unpin`, `seen` | Act on panes through a backend |
 
-The library (`src/lib.rs`) holds the state model, stores, harness adapters
-and backends. The binary adds the command line, the picker and the check.
+The library (`src/lib.rs`) holds the state model, the daemon with its store
+and protocol, the client, harness adapters and backends. The binary adds the
+command line, the picker and the check.
 
 ## Plugin loading
 
@@ -51,13 +52,14 @@ one.
 ## Changes and conditions
 
 An adapter turns each payload into a change and a condition on the pane's
-current record, which the store applies atomically. A change enters a state,
-keeping `since` when the pane is already in that exact state so repeated
-events don't reset the wait, and sets, keeps or clears the message, harness,
-session and agent. Conditions combine "the state is under S", "the wait was
-raised by agent A" and "the session is S". `Guarded::apply_to` in
-`src/store/mod.rs` is the reference semantics; the tests replay a sequence of
-events through the tmux store and compare each step with it.
+current record, which the daemon applies in one step under its lock. A
+change enters a state, keeping `since` when the pane is already in that
+exact state so repeated events don't reset the wait, and sets, keeps or
+clears the message, harness, session and agent. Conditions combine "the
+state is under S", "the wait was raised by agent A" and "the session is S".
+`Guarded::apply_to` in `src/store/mod.rs` is the semantics; the tests replay
+a sequence of events through the daemon and compare its mirror in tmux with
+it at each step.
 
 ## Claude Code adapter
 
@@ -134,10 +136,56 @@ Claude Code update changes its text, leaves the recorded state. `list
 --json` shows each pane's `sighting`. The patterns are tested against real
 screens kept in `tests/screens/`, one directory per Claude Code version.
 
-## Store
+## Daemon
 
-The tmux store keeps the record in pane options, which die with the pane,
-are readable by other tools, and need no daemon:
+The daemon (`src/daemon.rs`) holds every record in memory, keyed by pane,
+and runs the backends, on tokio. It starts on demand: a client that finds
+no socket spawns `tracon daemon` in its own process group and retries, so
+nothing has to be installed or supervised, and `tracon setup` greets it
+when tmux loads so it knows the server before the first hook. `tracon
+daemon --stop` ends it. One lock file keeps it to one daemon per runtime
+directory.
+
+The runtime directory is `$TRACON_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/tracon`,
+else `/tmp/tracon-<uid>`, readable by its user alone. It holds:
+
+| File | Contents |
+| --- | --- |
+| `rpc.sock` | Requests: JSON-RPC 2.0, one request and one response per line |
+| `events.sock` | The stream: a `hello`, a `snapshot` of every record, then every `change` and `removed` in order, each with a sequence number |
+| `journal.jsonl` | One line per record written, the last line for a pane winning; replayed at start, then rewritten to one line per live pane |
+| `lock` | Held by the running daemon |
+| `daemon.log` | Standard error of a daemon started on demand |
+
+The messages are in `src/protocol.rs`; both sides ignore fields they don't
+know. Every request carries the client's `TMUX` and `TMUX_PANE`, from which
+the tmux backend claims the pane and the server the client runs in, so a
+bare `%3` in a command resolves against that server, and the daemon serves
+several tmux servers at once. A locator can name the server outright, as
+`tmux:%3@/path/to/socket`.
+
+A request runs under the daemon's lock, on the blocking pool since
+backends run tmux synchronously: the change is applied, journaled and
+published before the next request is handled. A subscriber's snapshot is
+taken under the same lock, so nothing falls between it and the stream; one
+that stops reading, or falls more than a thousand changes behind, is
+dropped and reconnects for a fresh snapshot. At start, and on every list,
+records of panes that no longer exist are dropped.
+
+## Mirror
+
+tmux formats and scripts can't read the daemon, so the tmux plugin keeps a
+copy of each record in the pane's options. `tracon mirror`
+(`src/backend/tmux/mirror.rs`) is a subscriber: it connects to the event
+socket, writes every record of its server from the snapshot and clears the
+options of panes that have some but no record, then writes each change as
+it arrives. Setup starts one per server as a tmux job, so it dies with the
+server; a lock per server in the runtime directory sends a second one
+away, and the running one's process id is in the global option
+`@tracon-mirror-pid`, which setup uses to replace it when the binary
+changes and to stop it on removal. When the daemon stops, the mirror waits
+for the next one and resyncs from its snapshot. tracon never reads the
+options back:
 
 | Option | Meaning |
 | --- | --- |
@@ -150,12 +198,13 @@ are readable by other tools, and need no daemon:
 | `@tracon_pinned` | `1` when pinned; outlives the state |
 | `@tracon_viewed` | When a client last focused the pane, in seconds since the epoch; outlives the state |
 
-Each change is one tmux invocation: `if-shell -F` with the condition as a
-tmux format, running the option changes, followed by `wait-for -S tracon`.
-The picker blocks in `wait-for tracon` and refreshes when it returns, with a
-slow refresh for ages. Loading reads every pane's options with one
-`list-panes -a`, using a control character as the field separator; stores
-replace it in values they write.
+Each mirror write ends with `wait-for -S tracon`, so a script blocked on
+that channel wakes up as it did before the daemon, a moment after the
+change rather than before the hook returns. The picker reads the event
+socket instead, and refreshes ages on a slow tick. Every tmux client tracon
+runs is started with `-u`: without it, tmux replaces control characters in
+its output when the locale isn't UTF-8, and the field separator in
+`list-panes -F` output is one.
 
 ## Ordering
 
@@ -189,8 +238,9 @@ terminal has focus shows the pane.
 
 ## Setup
 
-`tracon setup` binds the picker key, registers the focus hook, and records
-`@tracon-bin`, `@tracon-version`, `@tracon-dir` and `@tracon-bound-key`. It
+`tracon setup` binds the picker key, registers the focus hook, starts the
+mirror, and records `@tracon-bin`, `@tracon-version`, `@tracon-dir` and
+`@tracon-bound-key`. It
 holds `wait-for -L tracon-setup` while it runs, so concurrent reloads don't
 interleave. The hook goes in slot 80 of the `pane-focus-in` array, or the
 next free slot if something else uses 80, and setup first removes any tracon
@@ -207,17 +257,21 @@ and no client is attached while the configuration first loads.
 ## Hooks
 
 A hook exits successfully outside tmux and never fails the agent's tool call:
-errors go to standard error and the exit status is 0. It runs one tmux
-process per event, and `hooks.json` gives each hook a five-second timeout.
+errors go to standard error and the exit status is 0. It is one process and
+one request to the daemon per event, and `hooks.json` gives each hook a
+five-second timeout. Outside any pane tracon knows, it returns at once
+without starting a daemon.
 
 ## Components
 
 | Component | Responsibility |
 | --- | --- |
 | `src/state.rs` | States, records, rules and ordering |
-| `src/store/` | The `Store` trait, guarded changes and the tmux pane-option store |
+| `src/store/` | Guarded changes and the in-memory store |
+| `src/daemon.rs`, `src/protocol.rs`, `src/journal.rs`, `src/runtime.rs` | The daemon, its messages, its journal and its directory |
+| `src/client.rs` | The client every command uses, which starts the daemon on demand |
 | `src/harness/` | The `Harness` trait and the Claude Code adapter |
-| `src/backend/` | The `Backend` trait, locators and the tmux backend, with setup |
+| `src/backend/` | The `Backend` trait, locators and the tmux backend, with setup and the mirror |
 | `src/list.rs` | The ordered list front ends show |
 | `src/cli.rs`, `src/ui.rs`, `src/check.rs` | The command line, the picker and the check |
 | `tracon.tmux` | The tmux plugin's entry point |

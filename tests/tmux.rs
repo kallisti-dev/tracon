@@ -1,14 +1,17 @@
 //! The binary and both plugins against a real tmux server on a disposable
-//! socket. No command here receives the caller's `TMUX`, so a test run inside
-//! tmux never touches that server.
+//! socket, with a daemon and an option mirror of their own in a disposable
+//! runtime directory. No command here receives the caller's `TMUX` or
+//! runtime directory, so a test run inside tmux never touches that server
+//! or the daemon serving it.
 //!
 //! The packaging check points `TEST_TMUX_PLUGIN` and `TEST_CLAUDE_PLUGIN` at
 //! the Nix packages; otherwise the tests assemble both plugins from the
 //! source and the freshly built binary.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::symlink;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::thread::sleep;
@@ -18,6 +21,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use tracon::harness::{Claude, Harness};
+use tracon::runtime::DIR_VAR;
 use tracon::state::Record;
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -56,9 +60,14 @@ struct Client {
 struct Server {
     dir: TempDir,
     socket: PathBuf,
+    /// The daemon's directory, which every command and the tmux server's
+    /// environment name.
+    runtime: PathBuf,
     tmux_plugin: PathBuf,
     claude_plugin: PathBuf,
     clients: Vec<Client>,
+    /// The option mirror, as setup would start it, but a child of the test.
+    mirror: Option<Child>,
 }
 
 impl Server {
@@ -69,26 +78,33 @@ impl Server {
             .tempdir_in("/tmp")
             .unwrap();
         let socket = dir.path().join("s");
+        let runtime = dir.path().join("d");
         fs::create_dir(dir.path().join("home")).unwrap();
         let config = dir.path().join("tmux.conf");
         fs::write(
             &config,
-            "set -g default-shell /bin/sh\n\
-             set -g status off\n\
-             set -g exit-empty off\n\
-             set -g base-index 0\n\
-             set -g pane-base-index 0\n\
-             set -g automatic-rename off\n\
-             set -g focus-events on\n",
+            format!(
+                "set -g default-shell /bin/sh\n\
+                 set -g status off\n\
+                 set -g exit-empty off\n\
+                 set -g base-index 0\n\
+                 set -g pane-base-index 0\n\
+                 set -g automatic-rename off\n\
+                 set -g focus-events on\n\
+                 set-environment -g {DIR_VAR} {}\n",
+                runtime.display()
+            ),
         )
         .unwrap();
         let (tmux_plugin, claude_plugin) = Self::plugins(dir.path());
-        let server = Server {
+        let mut server = Server {
             dir,
             socket,
+            runtime,
             tmux_plugin,
             claude_plugin,
             clients: Vec::new(),
+            mirror: None,
         };
         let started = server
             .command("tmux")
@@ -99,7 +115,21 @@ impl Server {
             .output()
             .unwrap();
         assert!(started.status.success(), "{started:?}");
+        server.mirror = Some(server.spawn_mirror());
         server
+    }
+
+    fn spawn_mirror(&self) -> Child {
+        fs::create_dir_all(&self.runtime).unwrap();
+        let log = fs::File::create(self.runtime.join("mirror.log")).unwrap();
+        let mut command = self.command(self.binary());
+        self.inside(&mut command, "%0");
+        command
+            .arg("mirror")
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap()
     }
 
     /// Both plugins, as packaged or assembled like a packaged copy.
@@ -146,6 +176,7 @@ impl Server {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("TRACON_CLIENT")
+            .env(DIR_VAR, &self.runtime)
             .env("HOME", self.home())
             .env("TERM", "xterm-256color")
             .stdin(Stdio::null());
@@ -223,6 +254,61 @@ impl Server {
 
     fn state(&self, pane: &str) -> String {
         self.option(pane, "@tracon_state")
+    }
+
+    /// Wait for the mirror to show `expected` as the pane's state.
+    fn state_becomes(&self, pane: &str, expected: &str) {
+        self.option_becomes(pane, "@tracon_state", expected);
+    }
+
+    fn option_becomes(&self, pane: &str, name: &str, expected: &str) {
+        wait_until(
+            &format!("{name} of {pane} is {expected:?}"),
+            Duration::from_secs(10),
+            || (self.option(pane, name) == expected).then_some(()),
+        );
+    }
+
+    /// The listed entry for `pane`, when it is listed.
+    fn entry(&self, pane: &str) -> Option<Value> {
+        self.list()
+            .into_iter()
+            .find(|entry| entry["pane"]["id"] == pane)
+    }
+
+    /// Give `pane` a state before the daemon starts, through its journal.
+    fn seed(&self, pane: &str, state: &str, since: u64) {
+        assert!(
+            !self.runtime.join("rpc.sock").exists(),
+            "seed before the daemon starts"
+        );
+        fs::create_dir_all(&self.runtime).unwrap();
+        let line = json!({
+            "pane": { "backend": "tmux", "id": pane, "server": self.socket },
+            "record": { "state": state, "since": since },
+        });
+        let mut journal = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(self.runtime.join("journal.jsonl"))
+            .unwrap();
+        writeln!(journal, "{line}").unwrap();
+    }
+
+    /// The event socket, read past its greeting and snapshot.
+    fn events(&self) -> BufReader<UnixStream> {
+        let stream = UnixStream::connect(self.runtime.join("events.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        for expected in ["hello", "snapshot"] {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let message: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(message["type"], expected, "{line}");
+        }
+        reader
     }
 
     fn list(&self) -> Vec<Value> {
@@ -325,9 +411,26 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // Only ever this test's own socket.
+        // Only ever this test's own daemon and socket.
+        assert!(self.runtime.starts_with(self.dir.path()));
         assert!(self.socket.starts_with(self.dir.path()));
+        if let Some(mirror) = &mut self.mirror {
+            let _ = mirror.kill();
+            let _ = mirror.wait();
+        }
+        let _ = self
+            .command(self.binary())
+            .args(["daemon", "--stop"])
+            .output();
         let _ = self.tmux_output(&["kill-server"]);
+        // Shown for a failed test, where their complaints explain it.
+        for log in ["daemon.log", "mirror.log"] {
+            if let Ok(text) = fs::read_to_string(self.runtime.join(log))
+                && !text.is_empty()
+            {
+                eprintln!("{log}:\n{text}");
+            }
+        }
         for client in &mut self.clients {
             let _ = client.process.kill();
             let _ = client.process.wait();
@@ -352,25 +455,30 @@ fn bash(agent: Option<&str>) -> Value {
 }
 
 #[test]
-fn hooks_record_state_in_pane_options() {
+fn hooks_record_state_and_the_mirror_follows() {
     let server = Server::start();
     server.hook("%0", event("SessionStart", json!({ "source": "startup" })));
-    assert_eq!(server.state("%0"), "idle");
+    server.state_becomes("%0", "idle");
     assert_eq!(server.option("%0", "@tracon_harness"), "claude");
     assert_eq!(server.option("%0", "@tracon_session"), SESSION);
 
     server.hook("%0", event("PermissionRequest", bash(None)));
-    assert_eq!(server.state("%0"), "waiting.permission");
+    server.state_becomes("%0", "waiting.permission");
     assert_eq!(server.option("%0", "@tracon_message"), "Bash: ls -la > x");
     let entry = &server.list()[0];
-    assert_eq!(entry["pane"], json!({ "backend": "tmux", "id": "%0" }));
+    assert_eq!(entry["pane"]["backend"], "tmux");
+    assert_eq!(entry["pane"]["id"], "%0");
+    assert_eq!(
+        entry["pane"]["server"],
+        server.socket.to_string_lossy().as_ref()
+    );
     assert_eq!(entry["location"], "work:0.0");
     assert_eq!(entry["state"], "waiting.permission");
     assert_eq!(entry["harness"], "claude");
 }
 
 #[test]
-fn the_tmux_store_matches_the_reference_semantics() {
+fn hooks_match_the_reference_semantics() {
     let server = Server::start();
     let sub = "ae48a9ce1c4008eda";
     let quoted = "it's ; #{pane_id} $HOME ~ \"q\" \\ end;";
@@ -420,36 +528,27 @@ fn the_tmux_store_matches_the_reference_semantics() {
         if let Some(change) = Claude.interpret(&payload).unwrap() {
             change.apply_to(&mut reference, 1_000_000 + step as u64);
         }
-        let stored_before = server.option("%0", "@tracon_since");
+        let stored_before = server.entry("%0").and_then(|entry| entry["since"].as_u64());
         server.hook("%0", payload.clone());
-        let text = |value: &Option<String>| value.clone().unwrap_or_default();
+        let entry = server.entry("%0").unwrap_or(Value::Null);
+        let text = |value: &Option<String>| value.clone().map_or(Value::Null, Value::String);
         let state = reference
             .state
             .as_ref()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        assert_eq!(server.state("%0"), state, "step {step}: {payload}");
-        assert_eq!(
-            server.option("%0", "@tracon_message"),
-            text(&reference.message),
-            "step {step}"
-        );
-        assert_eq!(
-            server.option("%0", "@tracon_agent"),
-            text(&reference.agent),
-            "step {step}"
-        );
-        assert_eq!(
-            server.option("%0", "@tracon_session"),
-            text(&reference.session),
-            "step {step}"
-        );
-        let stored = server.option("%0", "@tracon_since");
-        assert_eq!(stored.is_empty(), reference.since.is_none(), "step {step}");
+            .map_or(Value::Null, |state| Value::String(state.to_string()));
+        assert_eq!(entry["state"], state, "step {step}: {payload}");
+        assert_eq!(entry["message"], text(&reference.message), "step {step}");
+        assert_eq!(entry["agent"], text(&reference.agent), "step {step}");
+        assert_eq!(entry["session"], text(&reference.session), "step {step}");
+        let stored = entry["since"].as_u64();
+        assert_eq!(stored.is_none(), reference.since.is_none(), "step {step}");
         if since_before.is_some() && since_before == reference.since {
             assert_eq!(stored, stored_before, "step {step} reset since");
         }
     }
+    // The mirror follows, to the last SessionEnd's clearing.
+    server.state_becomes("%0", "");
+    assert_eq!(server.option("%0", "@tracon_session"), "");
 }
 
 #[test]
@@ -472,19 +571,11 @@ fn hooks_succeed_quietly_outside_tmux_and_report_bad_input() {
 fn panes_are_ordered_by_priority_then_wait_and_pins_apply() {
     let server = Server::start();
     let panes: Vec<String> = (0..4).map(|_| server.new_window("work")).collect();
-    let set = |pane: &str, state: &str, since: u64| {
-        for (option, value) in [
-            ("@tracon_state", state.to_owned()),
-            ("@tracon_since", since.to_string()),
-        ] {
-            server.tmux(&["set-option", "-p", "-t", pane, option, &value]);
-        }
-    };
-    set("%0", "idle", 1);
-    set(&panes[0], "done", 20);
-    set(&panes[1], "waiting.question", 30);
-    set(&panes[2], "waiting.permission", 10);
-    set(&panes[3], "working", 5);
+    server.seed("%0", "idle", 1);
+    server.seed(&panes[0], "done", 20);
+    server.seed(&panes[1], "waiting.question", 30);
+    server.seed(&panes[2], "waiting.permission", 10);
+    server.seed(&panes[3], "working", 5);
     let pane = |id: &str, state: &str| (id.to_owned(), state.to_owned());
     assert_eq!(
         server.listed(),
@@ -498,14 +589,14 @@ fn panes_are_ordered_by_priority_then_wait_and_pins_apply() {
     );
 
     server.tracon(&panes[3], &["pin"]);
-    assert_eq!(server.option(&panes[3], "@tracon_pinned"), "1");
+    server.option_becomes(&panes[3], "@tracon_pinned", "1");
     assert_eq!(server.listed()[2], pane(&panes[3], "working"));
     assert_eq!(server.list()[2]["pinned"], true);
 
     server.tmux(&["set-option", "-g", "@tracon-order", "working waiting"]);
     assert_eq!(server.listed()[0], pane(&panes[3], "working"));
     server.tracon("%0", &["unpin", &panes[3]]);
-    assert_eq!(server.option(&panes[3], "@tracon_pinned"), "");
+    server.option_becomes(&panes[3], "@tracon_pinned", "");
 
     server.tmux(&["set-option", "-g", "@tracon-order", "waiting Bad"]);
     let output = server.tracon_output("%0", &["list"], None);
@@ -565,7 +656,7 @@ fn focusing_a_finished_pane_marks_it_seen() {
         event("Stop", json!({ "last_assistant_message": "All done" })),
     );
     server.hook(&other, event("PermissionRequest", bash(None)));
-    assert_eq!(server.state("%0"), "done");
+    server.state_becomes("%0", "done");
 
     server.tracon("%0", &["focus", "%0", "--client", &client]);
     wait_until("the pane is seen", Duration::from_secs(10), || {
@@ -575,7 +666,7 @@ fn focusing_a_finished_pane_marks_it_seen() {
     // Seeing a pane doesn't answer its prompt.
     server.tracon("%0", &["focus", &other, "--client", &client]);
     server.tracon("%0", &["seen", &other]);
-    assert_eq!(server.state(&other), "waiting.permission");
+    assert_eq!(server.entry(&other).unwrap()["state"], "waiting.permission");
 }
 
 #[test]
@@ -636,8 +727,8 @@ fn stale_panes_are_listed_from_what_their_screen_shows() {
     assert_eq!(sighting("%0"), "working");
     assert_eq!(sighting(&refused), "interrupted");
     assert_eq!(sighting(&cancelled), "finished");
-    assert_eq!(server.state("%0"), "waiting.permission");
-    assert_eq!(server.state(&cancelled), "working");
+    server.state_becomes("%0", "waiting.permission");
+    server.state_becomes(&cancelled, "working");
 }
 
 #[test]
@@ -648,20 +739,18 @@ fn a_turn_that_ends_in_view_is_seen() {
     let finished = event("Stop", json!({ "last_assistant_message": "All done" }));
     server.hook("%0", finished.clone());
     server.hook(&hidden, finished);
-    assert_eq!(server.state("%0"), "idle");
+    server.state_becomes("%0", "idle");
     assert_eq!(server.option("%0", "@tracon_message"), "All done");
-    assert_eq!(server.state(&hidden), "done");
+    server.state_becomes(&hidden, "done");
 }
 
 #[test]
 fn a_pane_viewed_last_leads_the_idle_group() {
     let mut server = Server::start();
-    server.setup();
     let panes: Vec<String> = (0..3).map(|_| server.new_window("work")).collect();
-    for (pane, since) in [(&panes[0], "10"), (&panes[1], "20")] {
-        server.tmux(&["set-option", "-p", "-t", pane, "@tracon_state", "idle"]);
-        server.tmux(&["set-option", "-p", "-t", pane, "@tracon_since", since]);
-    }
+    server.seed(&panes[0], "idle", 10);
+    server.seed(&panes[1], "idle", 20);
+    server.setup();
     server.hook(&panes[2], event("Stop", json!({})));
     let client = server.attach("work");
     server.tracon("%0", &["focus", &panes[2], "--client", &client]);
@@ -682,6 +771,54 @@ fn a_pane_viewed_last_leads_the_idle_group() {
         server.listed(),
         [idle(&panes[0]), idle(&panes[1]), idle(&panes[2])]
     );
+}
+
+#[test]
+fn the_daemon_starts_on_demand_and_replays_its_journal() {
+    let server = Server::start();
+    let gone = server.new_window("work");
+    assert!(!server.runtime.join("rpc.sock").exists());
+    server.hook("%0", event("SessionStart", json!({})));
+    server.hook(&gone, event("SessionStart", json!({})));
+    assert!(server.runtime.join("rpc.sock").exists());
+    server.state_becomes("%0", "idle");
+
+    server.tracon("%0", &["daemon", "--stop"]);
+    wait_until("the daemon stops", Duration::from_secs(10), || {
+        (!server.runtime.join("rpc.sock").exists()).then_some(())
+    });
+    // Panes that die while no daemon runs are forgotten on restart, and the
+    // mirror of the rest is written afresh.
+    server.tmux(&["kill-pane", "-t", &gone]);
+    server.tmux(&["set-option", "-pu", "-t", "%0", "@tracon_state"]);
+    let pane = |id: &str, state: &str| (id.to_owned(), state.to_owned());
+    assert_eq!(server.listed(), [pane("%0", "idle")]);
+    server.state_becomes("%0", "idle");
+    let journal = fs::read_to_string(server.runtime.join("journal.jsonl")).unwrap();
+    assert!(journal.contains(r#""id":"%0""#), "{journal}");
+    assert!(!journal.contains(&format!(r#""id":"{gone}""#)), "{journal}");
+}
+
+#[test]
+fn the_event_socket_streams_every_change() {
+    let server = Server::start();
+    server.hook("%0", event("SessionStart", json!({})));
+    let mut events = server.events();
+    server.hook("%0", event("PermissionRequest", bash(None)));
+    let mut line = String::new();
+    events.read_line(&mut line).unwrap();
+    let message: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(message["type"], "change", "{line}");
+    assert_eq!(message["pane"]["id"], "%0");
+    assert_eq!(message["record"]["state"], "waiting.permission");
+    assert_eq!(message["seq"], 2);
+
+    server.hook("%0", event("SessionEnd", json!({})));
+    line.clear();
+    events.read_line(&mut line).unwrap();
+    let message: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(message["type"], "removed", "{line}");
+    assert_eq!(message["seq"], 3);
 }
 
 #[test]
@@ -793,9 +930,9 @@ fn every_registered_claude_hook_runs() {
     }
     assert!(events >= 14, "{events} hooks");
     run("SessionStart", groups_command(&hooks, "SessionStart"));
-    assert_eq!(server.state("%0"), "idle");
+    server.state_becomes("%0", "idle");
     run("SessionEnd", &session_end.expect("a SessionEnd hook"));
-    assert_eq!(server.state("%0"), "");
+    server.state_becomes("%0", "");
 }
 
 fn groups_command<'a>(hooks: &'a Value, event: &str) -> &'a str {

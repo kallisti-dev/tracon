@@ -6,9 +6,11 @@ use std::process::{Command, ExitCode};
 use anyhow::Result;
 use serde_json::Value;
 
+use tracon::backend::TmuxBackend;
 use tracon::backend::tmux::setup;
-use tracon::backend::{Backend, TmuxBackend};
-use tracon::store::TmuxStore;
+use tracon::client::Client;
+use tracon::protocol::{self, HelloResult};
+use tracon::runtime::Runtime;
 use tracon::tmux::Tmux;
 use tracon::{Config, State};
 
@@ -48,17 +50,13 @@ fn at_least(version: &str, major: u32, minor: u32) -> bool {
     have >= (major, minor)
 }
 
-pub fn run(
-    tmux: &Tmux,
-    backend: &TmuxBackend,
-    store: &TmuxStore,
-    session: Option<&str>,
-) -> Result<ExitCode> {
+pub fn run(runtime: &Runtime, session: Option<&str>) -> Result<ExitCode> {
     let mut report = Report::default();
     if !Tmux::inside() {
         report.problem("not running inside tmux, so there is no server to check");
         return Ok(ExitCode::FAILURE);
     }
+    let tmux = &Tmux::default();
 
     let version = tmux.run(["-V"])?;
     let version = version.trim();
@@ -103,6 +101,11 @@ pub fn run(
         } else {
             report.problem("the pane-focus-in hook is missing; reload the tmux configuration");
         }
+        if installed.mirror {
+            report.ok("the option mirror runs");
+        } else {
+            report.problem("the option mirror isn't running, so @tracon_* options are stale; reload the tmux configuration");
+        }
     }
     if tmux.global_option("focus-events")? != "on" {
         report.problem(
@@ -113,9 +116,28 @@ pub fn run(
         report.problem(format!("a tracon option is invalid: {error}"));
     }
 
+    let hello = Client::connect(runtime).and_then(|mut client| {
+        client.call::<HelloResult>(
+            "hello",
+            protocol::Hello {
+                env: protocol::env(),
+            },
+        )
+    });
+    match hello {
+        Ok(hello) if hello.version == VERSION => {
+            report.ok(format!("the daemon runs tracon {}", hello.version));
+        }
+        Ok(hello) => report.problem(format!(
+            "the daemon runs tracon {}, but this is {VERSION}; run tracon daemon --stop, and it restarts on demand",
+            hello.version
+        )),
+        Err(error) => report.problem(format!("the daemon did not answer: {error}")),
+    }
+
     check_claude(&mut report);
 
-    let entries = entries(tmux, backend, store)?;
+    let entries = entries(runtime)?;
     let silent: Vec<_> = entries
         .iter()
         .filter(|entry| {
@@ -135,11 +157,11 @@ pub fn run(
         ));
     }
 
-    if let (Some(session), Some(pane)) = (session, backend.locate()) {
-        let recorded = tracon::store::Store::load(store)?
-            .into_iter()
-            .find(|(locator, _)| *locator == pane)
-            .and_then(|(_, record)| record.session);
+    if let (Some(session), Some(pane)) = (session, TmuxBackend::claim(&protocol::env())) {
+        let recorded = entries
+            .iter()
+            .find(|entry| entry.pane == pane)
+            .and_then(|entry| entry.session.clone());
         if recorded.as_deref() == Some(session) {
             report.ok(format!("this pane records session {session}"));
         } else {

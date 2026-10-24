@@ -2,10 +2,11 @@
 
 pub mod tmux;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
@@ -13,12 +14,20 @@ pub use tmux::TmuxBackend;
 
 pub const TMUX: &str = "tmux";
 
-/// A pane as one backend names it: the backend's id and an id that only that
-/// backend interprets, such as tmux's `%3`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+/// Environment variables by which a backend recognises the pane and the
+/// server a process runs in, such as `TMUX` and `TMUX_PANE`.
+pub type Env = BTreeMap<String, String>;
+
+/// A pane as one backend names it: the backend, the server instance when
+/// the backend can run several, and an id only that backend interprets,
+/// such as tmux's `%3`. The server is absent for a pane named from inside
+/// it, and filled in by the daemon.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Locator {
     pub backend: String,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 impl Locator {
@@ -26,29 +35,54 @@ impl Locator {
         Locator {
             backend: TMUX.to_owned(),
             id: id.to_owned(),
+            server: None,
+        }
+    }
+
+    pub fn tmux_at(server: &str, id: &str) -> Self {
+        Locator {
+            server: Some(server.to_owned()),
+            ..Locator::tmux(id)
+        }
+    }
+
+    /// The same pane on `server`, when this locator names none.
+    pub fn on(self, server: Option<&str>) -> Self {
+        Locator {
+            server: self.server.or_else(|| server.map(str::to_owned)),
+            ..self
         }
     }
 }
 
-/// `tmux:%3`, or a bare `%3`, which only tmux uses.
+/// `tmux:%3`, a bare `%3`, which only tmux uses, or `tmux:%3@/path/to/socket`
+/// naming the server.
 impl FromStr for Locator {
     type Err = Error;
 
     fn from_str(text: &str) -> Result<Self, Error> {
-        let (backend, id) = text.split_once(':').unwrap_or((TMUX, text));
+        let (backend, rest) = text.split_once(':').unwrap_or((TMUX, text));
         if backend != TMUX {
             return Err(Error::UnsupportedBackend(backend.to_owned()));
         }
+        let (id, server) = match rest.split_once('@') {
+            Some((id, server)) if !server.is_empty() => (id, Some(server)),
+            _ => (rest, None),
+        };
         if !crate::tmux::valid_pane_id(id) {
             return Err(Error::InvalidPane(text.to_owned()));
         }
-        Ok(Locator::tmux(id))
+        Ok(Locator::tmux(id).on(server))
     }
 }
 
 impl fmt::Display for Locator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.backend, self.id)
+        write!(f, "{}:{}", self.backend, self.id)?;
+        if let Some(server) = &self.server {
+            write!(f, "@{server}")?;
+        }
+        Ok(())
     }
 }
 
@@ -80,8 +114,8 @@ pub struct Host {
 
 pub trait Backend {
     fn name(&self) -> &'static str;
-    /// The pane this process runs in, from the environment.
-    fn locate(&self) -> Option<Locator>;
+    /// The server instance this backend talks to, as its locators carry it.
+    fn server(&self) -> Option<&str>;
     fn panes(&self) -> Result<Vec<PaneInfo>, Error>;
     /// Bring `pane` into view on `client`, or on the most recently active
     /// client when none is given.
@@ -104,11 +138,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn locators_parse_with_or_without_a_backend() {
+    fn locators_parse_with_or_without_a_backend_and_server() {
         assert_eq!("%3".parse::<Locator>().unwrap(), Locator::tmux("%3"));
         assert_eq!("tmux:%3".parse::<Locator>().unwrap(), Locator::tmux("%3"));
         assert_eq!(Locator::tmux("%3").to_string(), "tmux:%3");
+        let at = Locator::tmux_at("/tmp/s", "%3");
+        assert_eq!(at.to_string(), "tmux:%3@/tmp/s");
+        assert_eq!(at.to_string().parse::<Locator>().unwrap(), at);
+        assert_eq!(Locator::tmux("%3").on(Some("/tmp/s")), at);
+        assert_eq!(at.clone().on(Some("/tmp/other")), at);
         assert!("kitty:3".parse::<Locator>().is_err());
         assert!("3".parse::<Locator>().is_err());
+        assert!("%3@".parse::<Locator>().is_err());
     }
 }

@@ -1,15 +1,15 @@
-//! Where pane state lives between hook invocations.
+//! Changes to a pane's record, and the store that holds the records.
 //!
 //! A change carries a condition on the pane's current record, so an adapter
 //! can say "enter `waiting.permission` unless the pane already waits" without
-//! a separate read. Stores apply the condition and the change atomically.
+//! a separate read. The daemon applies the condition and the change in one
+//! step, under its lock.
 
-pub mod tmux;
+pub mod memory;
 
 use crate::state::{Record, State};
-use crate::{Error, Locator};
 
-pub use tmux::TmuxStore;
+pub use memory::MemoryStore;
 
 /// How a change treats one field.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -113,8 +113,7 @@ impl Guarded {
         Guarded { change, when }
     }
 
-    /// Apply to an in-memory record at time `now`: the reference semantics
-    /// every store implements.
+    /// Apply to a record at time `now`.
     pub fn apply_to(&self, record: &mut Record, now: u64) {
         if !self.when.eval(record) {
             return;
@@ -139,16 +138,6 @@ impl Guarded {
             }
         }
     }
-}
-
-pub trait Store {
-    /// Every pane's record, including panes with only a pin.
-    fn load(&self) -> Result<Vec<(Locator, Record)>, Error>;
-    /// Apply `change` to `pane` if its condition holds, at time `now`.
-    fn apply(&self, pane: &Locator, change: &Guarded, now: u64) -> Result<(), Error>;
-    fn set_pinned(&self, pane: &Locator, pinned: bool) -> Result<(), Error>;
-    /// Record that a client focused `pane` at `at`.
-    fn set_viewed(&self, pane: &Locator, at: u64) -> Result<(), Error>;
 }
 
 /// Session and agent ids appear in store queries, so they are limited to the

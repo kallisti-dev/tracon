@@ -1,8 +1,9 @@
-//! tmux, the baseline backend.
+//! tmux, the baseline backend: one instance per server.
 
+pub mod mirror;
 pub mod setup;
 
-use super::{Backend, Capabilities, Host, Locator, PaneInfo, TMUX};
+use super::{Backend, Capabilities, Env, Host, Locator, PaneInfo, TMUX};
 use crate::Error;
 use crate::tmux::{self, SEPARATOR, Tmux};
 
@@ -36,6 +37,17 @@ impl TmuxBackend {
 
     pub fn tmux(&self) -> &Tmux {
         &self.tmux
+    }
+
+    /// The pane a process with `env` runs in, on the server `$TMUX` names.
+    pub fn claim(env: &Env) -> Option<Locator> {
+        let server = tmux::socket_in(env.get("TMUX")?)?;
+        let pane = env.get("TMUX_PANE")?;
+        tmux::valid_pane_id(pane).then(|| Locator::tmux_at(&server.to_string_lossy(), pane))
+    }
+
+    fn locator(&self, id: &str) -> Locator {
+        Locator::tmux(id).on(self.server())
     }
 
     /// The client to act on: `client` if given, otherwise the most recently
@@ -99,12 +111,8 @@ impl Backend for TmuxBackend {
         TMUX
     }
 
-    fn locate(&self) -> Option<Locator> {
-        if !Tmux::inside() {
-            return None;
-        }
-        let pane = std::env::var("TMUX_PANE").ok()?;
-        tmux::valid_pane_id(&pane).then(|| Locator::tmux(&pane))
+    fn server(&self) -> Option<&str> {
+        self.tmux.socket().and_then(|socket| socket.to_str())
     }
 
     fn panes(&self) -> Result<Vec<PaneInfo>, Error> {
@@ -125,7 +133,7 @@ impl Backend for TmuxBackend {
                     return None;
                 };
                 Some(PaneInfo {
-                    pane: Locator::tmux(pane),
+                    pane: self.locator(pane),
                     location: format!("{session}:{window}.{index}"),
                     title: title.to_owned(),
                     command: command.to_owned(),
@@ -155,7 +163,7 @@ impl Backend for TmuxBackend {
             pane,
         ]);
         match result {
-            Err(error) if !self.alive(&Locator::tmux(pane))? => {
+            Err(error) if !self.alive(&self.locator(pane))? => {
                 drop(error);
                 Err(Error::PaneGone(pane.to_owned()))
             }
@@ -173,7 +181,7 @@ impl Backend for TmuxBackend {
             .tmux
             .run(["display-message", "-p", "-c", &client, "#{pane_id}"])?;
         let pane = pane.trim();
-        Ok(tmux::valid_pane_id(pane).then(|| Locator::tmux(pane)))
+        Ok(tmux::valid_pane_id(pane).then(|| self.locator(pane)))
     }
 
     fn in_view(&self, pane: &Locator) -> Result<bool, Error> {

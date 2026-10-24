@@ -5,13 +5,15 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+use tracon::backend::TmuxBackend;
+use tracon::backend::tmux::mirror;
 use tracon::backend::tmux::setup;
-use tracon::backend::{Backend, TmuxBackend};
-use tracon::harness::{self, Harness};
-use tracon::list::{self, Entry};
-use tracon::store::{Change, Cond, Guarded, Store, TmuxStore, Update};
+use tracon::client::Client;
+use tracon::list::Entry;
+use tracon::protocol::{self, HelloResult, NextResult};
+use tracon::runtime::Runtime;
 use tracon::tmux::{self as tmux_util, Tmux};
-use tracon::{Config, Locator, State};
+use tracon::{Locator, daemon};
 
 use crate::{check, ui};
 
@@ -78,6 +80,15 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Run the daemon in the foreground, or stop the one running. Commands
+    /// start it on demand, so this is rarely needed.
+    Daemon {
+        #[arg(long)]
+        stop: bool,
+    },
+    /// Mirror this tmux server's records into its panes' options until the
+    /// server exits. Setup starts it.
+    Mirror,
 }
 
 pub fn run() -> ExitCode {
@@ -99,13 +110,11 @@ pub fn run() -> ExitCode {
 }
 
 fn dispatch(command: Command) -> Result<ExitCode> {
-    let tmux = Tmux;
-    let backend = TmuxBackend::new(tmux.clone());
-    let store = TmuxStore::new(tmux.clone());
+    let runtime = Runtime::from_env();
     match command {
         Command::Hook { .. } => unreachable!("handled before dispatch"),
         Command::List { json } => {
-            let entries = entries(&tmux, &backend, &store)?;
+            let entries = entries(&runtime)?;
             let mut out = std::io::stdout().lock();
             if json {
                 serde_json::to_writer_pretty(&mut out, &entries)?;
@@ -117,37 +126,42 @@ fn dispatch(command: Command) -> Result<ExitCode> {
                 }
             }
         }
-        Command::Focus { pane, client } => backend.focus(&pane, client_hint(client).as_deref())?,
+        Command::Focus { pane, client } => {
+            let params = protocol::Focus {
+                pane: pane.to_string(),
+                client: client_hint(client),
+                env: protocol::env(),
+            };
+            Client::connect(&runtime)?.call::<()>("focus", params)?;
+        }
         Command::Next { client } => {
             let client = client_hint(client);
-            let current = backend.current(client.as_deref())?;
-            let entries = entries(&tmux, &backend, &store)?;
-            match entries
-                .iter()
-                .find(|entry| Some(&entry.pane) != current.as_ref())
-            {
-                Some(entry) => backend.focus(&entry.pane, client.as_deref())?,
-                None => {
-                    let _ = backend.notify(client.as_deref(), "no other agent panes");
-                }
+            let params = protocol::Next {
+                client: client.clone(),
+                env: protocol::env(),
+            };
+            let result: NextResult = Client::connect(&runtime)?.call("next", params)?;
+            if result.focused.is_none() {
+                let _ = TmuxBackend::default().notify(client.as_deref(), "no other agent panes");
             }
         }
-        Command::Pin { pane } => store.set_pinned(&target(&backend, pane)?, true)?,
-        Command::Unpin { pane } => store.set_pinned(&target(&backend, pane)?, false)?,
+        Command::Pin { pane } => pin(&runtime, pane, true)?,
+        Command::Unpin { pane } => pin(&runtime, pane, false)?,
         Command::Seen { pane } => {
-            let pane = target(&backend, pane)?;
-            let now = tracon::now();
-            store.set_viewed(&pane, now)?;
-            store.apply(&pane, &seen(), now)?;
+            let params = protocol::Seen {
+                pane: pane.map(|pane| pane.to_string()),
+                env: protocol::env(),
+            };
+            Client::connect(&runtime)?.call::<()>("seen", params)?;
         }
         Command::Pick { client } => {
             let client = client_hint(client);
-            let config = Config::from_tmux(&tmux)?;
-            ui::pick(&tmux, &backend, &store, &config, client.as_deref())?;
+            ui::pick(&runtime, client.as_deref())?;
         }
         Command::Popup { client } => {
+            let backend = TmuxBackend::default();
             let client = backend.client(client_hint(client).as_deref())?;
-            if entries(&tmux, &backend, &store)?.is_empty() {
+            if entries(&runtime)?.is_empty() {
                 backend.notify(Some(&client), "no agent panes")?;
             } else {
                 let binary = std::env::current_exe().context("locating the tracon binary")?;
@@ -159,32 +173,69 @@ fn dispatch(command: Command) -> Result<ExitCode> {
             if !Tmux::inside() {
                 bail!("run inside tmux (TMUX must identify the server)");
             }
+            let tmux = Tmux::default();
             if remove {
                 setup::remove(&tmux)?;
             } else {
                 let binary = std::env::current_exe().context("locating the tracon binary")?;
                 setup::install(&tmux, &binary, dir.as_deref(), VERSION)?;
+                // Start the daemon now, so it knows this server before the
+                // first hook, and say so rather than fail the tmux load.
+                let hello = Client::connect(&runtime).and_then(|mut client| {
+                    client.call::<HelloResult>(
+                        "hello",
+                        protocol::Hello {
+                            env: protocol::env(),
+                        },
+                    )
+                });
+                if let Err(error) = hello {
+                    eprintln!("tracon: the daemon did not start: {error:#}");
+                }
             }
         }
         Command::Check { session } => {
-            return check::run(&tmux, &backend, &store, session.as_deref());
+            return check::run(&runtime, session.as_deref());
         }
+        Command::Daemon { stop: false } => daemon::run(&runtime)?,
+        Command::Mirror => {
+            let Some(tmux) = Tmux::from_env() else {
+                bail!("run inside tmux (TMUX must identify the server)");
+            };
+            let server = tmux
+                .socket()
+                .map(|socket| socket.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(mirror::run(&runtime, &server))?;
+        }
+        Command::Daemon { stop: true } => match Client::connect_running(&runtime) {
+            Ok(mut client) => client.call::<()>("stop", ())?,
+            Err(tracon::Error::Daemon { .. }) => {}
+            Err(error) => return Err(error.into()),
+        },
     }
     Ok(ExitCode::SUCCESS)
 }
 
 /// The listed panes, ordered by the configured rules.
-pub fn entries(tmux: &Tmux, backend: &impl Backend, store: &impl Store) -> Result<Vec<Entry>> {
-    let config = Config::from_tmux(tmux)?;
-    let records = store.load()?;
-    let panes = backend.panes()?;
-    Ok(list::entries(
-        panes,
-        records,
-        &harness::all(),
-        &config,
-        |pane| backend.text(pane).ok(),
-    ))
+pub fn entries(runtime: &Runtime) -> Result<Vec<Entry>> {
+    let params = protocol::List {
+        env: protocol::env(),
+    };
+    Ok(Client::connect(runtime)?.call("list", params)?)
+}
+
+fn pin(runtime: &Runtime, pane: Option<Locator>, pinned: bool) -> Result<()> {
+    let params = protocol::Pin {
+        pane: pane.map(|pane| pane.to_string()),
+        pinned,
+        env: protocol::env(),
+    };
+    Client::connect(runtime)?.call::<()>("pin", params)?;
+    Ok(())
 }
 
 fn client_hint(client: Option<String>) -> Option<String> {
@@ -193,30 +244,13 @@ fn client_hint(client: Option<String>) -> Option<String> {
         .filter(|client| !client.is_empty())
 }
 
-/// A finished pane becomes idle once seen; any other state is left alone.
-fn seen() -> Guarded {
-    let mut update = Update::new(State::known(State::IDLE));
-    update.agent = tracon::store::Field::Clear;
-    Guarded::when(
-        Change::Set(update),
-        Cond::StateUnder(State::known(State::DONE)),
-    )
-}
-
-fn target(backend: &impl Backend, pane: Option<Locator>) -> Result<Locator> {
-    match pane.or_else(|| backend.locate()) {
-        Some(pane) => Ok(pane),
-        None => bail!("name a pane, or run inside one"),
-    }
-}
-
 fn hook(name: &str) -> Result<()> {
-    let backend = TmuxBackend::default();
-    // Agents also run outside tmux; there is nothing to record.
-    let Some(pane) = backend.locate() else {
+    let env = protocol::env();
+    // Agents also run outside any pane tracon knows; there is nothing to
+    // record, and no daemon to start for it.
+    if TmuxBackend::claim(&env).is_none() {
         return Ok(());
-    };
-    let harness: Box<dyn Harness> = harness::by_name(name)?;
+    }
     let mut input = String::new();
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -225,18 +259,11 @@ fn hook(name: &str) -> Result<()> {
     stdin.lock().read_to_string(&mut input)?;
     let payload: serde_json::Value =
         serde_json::from_str(&input).context("parsing the hook payload")?;
-    if let Some(change) = harness.interpret(&payload)? {
-        let store = TmuxStore::default();
-        let now = tracon::now();
-        store.apply(&pane, &change, now)?;
-        // The focus hook only fires on a change of focus, so a turn that
-        // ends in view is seen here.
-        let finishes = matches!(&change.change, Change::Set(update)
-            if update.state.is_under(&State::known(State::DONE)));
-        if finishes && backend.in_view(&pane)? {
-            store.set_viewed(&pane, now)?;
-            store.apply(&pane, &seen(), now)?;
-        }
-    }
+    let params = protocol::Event {
+        harness: name.to_owned(),
+        payload,
+        env,
+    };
+    Client::connect(&Runtime::from_env())?.call::<protocol::EventResult>("event", params)?;
     Ok(())
 }

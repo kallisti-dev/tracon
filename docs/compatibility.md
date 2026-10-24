@@ -90,9 +90,9 @@ line.
 
 ## Testing limits
 
-The tests run the binary and both plugins against real tmux servers, as
-assembled from the source and as packaged by Nix, with hook payloads in
-place of an agent. Clients attach in control mode, which needs no terminal;
+The tests run the binary and both plugins against real tmux servers, each
+with a daemon of its own, as assembled from the source and as packaged by
+Nix, with hook payloads in place of an agent. Clients attach in control mode, which needs no terminal;
 popups are only checked to open without error. One test runs the real Claude
 Code binary without network access and checks that a session started in a new
 pane reports through the plugin installed as Home Manager installs it, and

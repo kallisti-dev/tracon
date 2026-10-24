@@ -42,6 +42,31 @@ configuration sets `pane-focus-in` without an index, which replaces every
 `pane-focus-in` hook, tracon's included. Give that hook an index, such as
 `set-hook -g 'pane-focus-in[0]' …`, or append it with `set-hook -ga`.
 
+## The daemon did not answer
+
+Every command starts the daemon when none is running, so this means it
+started and failed, or couldn't start. Its directory is
+`$TRACON_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/tracon`, else
+`/tmp/tracon-<uid>`; `daemon.log` there has what it printed. To start over:
+
+```sh
+tracon daemon --stop
+tracon list
+```
+
+If `tracon daemon --stop` reports no daemon but `lock` in that directory is
+held, a daemon runs that the sockets no longer reach; end it and try again.
+A daemon from an older installation answers with its version, and the
+check says so: stop it the same way.
+
+## The option mirror isn't running
+
+The `@tracon_*` pane options are written by `tracon mirror`, which the tmux
+plugin starts when it loads and which runs until the tmux server exits.
+Reload the tmux configuration to start it again; its complaints go to the
+tmux server's log, or to the terminal when you run `tracon mirror` by hand
+inside tmux. The list and the picker don't depend on it.
+
 ## Claude Code doesn't load the tracon plugin
 
 Install the `claude-plugin` package where Claude Code loads plugins: with Home
@@ -73,6 +98,8 @@ the pane keeps its last state until your next prompt. See
 records, and what tracon read on its screen (`sighting`):
 
 ```sh
-tmux show-options -p -t %3 | grep @tracon_
 tracon list --json
 ```
+
+The pane's `@tracon_*` options mirror the record for tmux's own use; if they
+disagree with the list, the mirror isn't running, as above.
