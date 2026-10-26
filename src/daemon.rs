@@ -17,8 +17,9 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::backend::{Backend, Env, Locator, PaneInfo, TMUX, TmuxBackend};
 use crate::harness;
@@ -153,10 +154,34 @@ struct Inner {
     seq: u64,
 }
 
+/// A `stop` request, answered once the daemon has let go of its directory,
+/// so that the client can start the next daemon at once.
+struct Stopping {
+    reply: OwnedWriteHalf,
+    line: String,
+}
+
 pub struct Daemon {
     inner: Mutex<Inner>,
     events: broadcast::Sender<Message>,
-    stop: watch::Sender<bool>,
+    stop: mpsc::UnboundedSender<Stopping>,
+}
+
+/// This executable, resolved through symlinks, or empty once it is gone.
+fn binary() -> String {
+    std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether an error only says the peer hung up, which is how every
+/// connection ends.
+fn hung_up(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
+    )
 }
 
 fn failed(error: Error) -> RpcError {
@@ -268,6 +293,7 @@ impl Daemon {
         protocol::HelloResult {
             version: VERSION.to_owned(),
             protocol: protocol::PROTOCOL,
+            binary: binary(),
         }
     }
 
@@ -383,7 +409,8 @@ impl Daemon {
         })
     }
 
-    /// Answer one request; `stop` is answered, then acted on by the caller.
+    /// Answer one request. `stop` is handed to the main loop, which answers
+    /// it after shutting down.
     fn handle(&self, request: &Request) -> Result<Value, RpcError> {
         fn json(value: impl Serialize) -> Result<Value, RpcError> {
             serde_json::to_value(value)
@@ -436,10 +463,15 @@ impl Daemon {
                     false,
                 ),
             };
-            writer.write_all(line_of(&response)?.as_bytes()).await?;
+            let line = line_of(&response)?;
             if stopping {
-                let _ = self.stop.send(true);
+                let _ = self.stop.send(Stopping {
+                    reply: writer,
+                    line,
+                });
+                return Ok(());
             }
+            writer.write_all(line.as_bytes()).await?;
         }
         Ok(())
     }
@@ -533,7 +565,7 @@ async fn serve(runtime: &Runtime) -> Result<(), Error> {
         }
     }
     let (events, _) = broadcast::channel(SUBSCRIBER_BACKLOG);
-    let (stop, mut stopped) = watch::channel(false);
+    let (stop, mut stops) = mpsc::unbounded_channel();
     let daemon = Arc::new(Daemon {
         inner: Mutex::new(Inner {
             store: MemoryStore::new(records),
@@ -560,32 +592,41 @@ async fn serve(runtime: &Runtime) -> Result<(), Error> {
         while let Ok((stream, _)) = subscribers.accept().await {
             let daemon = Arc::clone(&accepting);
             tokio::spawn(async move {
-                if let Err(error) = daemon.subscribe(stream).await {
+                if let Err(error) = daemon.subscribe(stream).await
+                    && !hung_up(&error)
+                {
                     eprintln!("tracon: subscriber: {error}");
                 }
             });
         }
     });
-    loop {
+    let stopping = loop {
         tokio::select! {
             accepted = requests.accept() => {
                 let (stream, _) = accepted?;
                 let daemon = Arc::clone(&daemon);
                 tokio::spawn(async move {
-                    if let Err(error) = daemon.serve(stream).await {
+                    if let Err(error) = daemon.serve(stream).await
+                        && !hung_up(&error)
+                    {
                         eprintln!("tracon: client: {error}");
                     }
                 });
             }
-            changed = stopped.changed() => {
-                if changed.is_err() || *stopped.borrow() {
-                    break;
-                }
-            }
+            stopping = stops.recv() => break stopping,
         }
-    }
+    };
     let _ = fs::remove_file(runtime.rpc_socket());
     let _ = fs::remove_file(runtime.events_socket());
     drop(lock_file);
+    // Only now can the next daemon start, so only now are the stops
+    // answered.
+    let mut stops_to_answer: Vec<_> = stopping.into_iter().collect();
+    while let Ok(stopping) = stops.try_recv() {
+        stops_to_answer.push(stopping);
+    }
+    for mut stopping in stops_to_answer {
+        let _ = stopping.reply.write_all(stopping.line.as_bytes()).await;
+    }
     Ok(())
 }

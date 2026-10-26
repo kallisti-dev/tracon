@@ -14,7 +14,7 @@ use tokio::time::sleep;
 
 use crate::Error;
 use crate::client::Client;
-use crate::protocol::{self, HelloResult, Message, Stored};
+use crate::protocol::{Message, Stored};
 use crate::runtime::Runtime;
 use crate::state::Record;
 use crate::tmux::{self, CHANNEL, SEPARATOR, Tmux};
@@ -184,14 +184,7 @@ async fn register(runtime: &Runtime) {
     let runtime = runtime.clone();
     let _ = tokio::task::spawn_blocking(move || {
         Client::connect_running(&runtime)
-            .and_then(|mut client| {
-                client.call::<HelloResult>(
-                    "hello",
-                    protocol::Hello {
-                        env: protocol::env(),
-                    },
-                )
-            })
+            .and_then(|mut client| client.hello())
             .map(drop)
     })
     .await;

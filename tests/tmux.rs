@@ -784,9 +784,8 @@ fn the_daemon_starts_on_demand_and_replays_its_journal() {
     server.state_becomes("%0", "idle");
 
     server.tracon("%0", &["daemon", "--stop"]);
-    wait_until("the daemon stops", Duration::from_secs(10), || {
-        (!server.runtime.join("rpc.sock").exists()).then_some(())
-    });
+    // Answered once the directory is free for the next daemon.
+    assert!(!server.runtime.join("rpc.sock").exists());
     // Panes that die while no daemon runs are forgotten on restart, and the
     // mirror of the rest is written afresh.
     server.tmux(&["kill-pane", "-t", &gone]);
@@ -1017,6 +1016,36 @@ fn popup_reports_an_empty_list_and_needs_a_client() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("no tmux client is attached"));
     let client = server.attach("work");
     server.tracon("%0", &["popup", &client]);
+}
+
+/// A daemon left by an earlier installation runs old code until setup finds
+/// it running from another binary and replaces it, keeping the records.
+#[test]
+fn setup_replaces_a_daemon_from_another_binary() {
+    let server = Server::start();
+    let old = server.dir.path().join("old-tracon");
+    fs::copy(env!("CARGO_BIN_EXE_tracon"), &old).unwrap();
+    let output = server.command(&old).arg("list").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    server.hook("%0", event("SessionStart", json!({})));
+    server.state_becomes("%0", "idle");
+    let runs_from = |binary: &Path| {
+        format!(
+            "ok       the daemon runs tracon {} from {}",
+            env!("CARGO_PKG_VERSION"),
+            fs::canonicalize(binary).unwrap().display()
+        )
+    };
+    let output = server.tracon_output("%0", &["check"], None);
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains(&runs_from(&old)), "{report}");
+
+    server.setup();
+    let output = server.tracon_output("%0", &["check"], None);
+    let report = String::from_utf8_lossy(&output.stdout);
+    let current = server.tmux_plugin.join("bin/tracon");
+    assert!(report.contains(&runs_from(&current)), "{report}");
+    assert_eq!(server.listed(), [("%0".to_owned(), "idle".to_owned())]);
 }
 
 #[test]

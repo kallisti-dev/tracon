@@ -134,6 +134,10 @@ pub struct Hello {
 pub struct HelloResult {
     pub version: String,
     pub protocol: u32,
+    /// The daemon's executable, resolved through symlinks; empty once it
+    /// no longer exists.
+    #[serde(default)]
+    pub binary: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

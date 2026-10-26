@@ -1,10 +1,11 @@
 //! A client of the daemon: one request and response at a time on the
 //! request socket, and a reader of the event socket.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::Error;
-use crate::protocol::{Request, Response};
+use crate::protocol::{self, HelloResult, Request, Response};
 use crate::runtime::{DIR_VAR, Runtime};
 
 /// How long a freshly started daemon gets to open its sockets.
@@ -88,6 +89,36 @@ impl Client {
         Ok(serde_json::from_value(response.result.unwrap_or_default())?)
     }
 
+    /// Connect to a daemon that runs this binary. One that runs another,
+    /// left by an earlier installation, is stopped and replaced.
+    pub fn connect_current(runtime: &Runtime) -> Result<(Self, HelloResult), Error> {
+        let mut client = Self::connect(runtime)?;
+        let hello = client.hello()?;
+        if !from_another_binary(&hello, &std::env::current_exe()?) {
+            return Ok((client, hello));
+        }
+        client.stop()?;
+        let mut client = Self::connect(runtime)?;
+        let hello = client.hello()?;
+        Ok((client, hello))
+    }
+
+    /// Greet the daemon, which tells it this client's tmux server.
+    pub fn hello(&mut self) -> Result<HelloResult, Error> {
+        self.call(
+            "hello",
+            protocol::Hello {
+                env: protocol::env(),
+            },
+        )
+    }
+
+    /// Stop the daemon. It answers once it has let go of its directory, so
+    /// the next connection starts a new one.
+    pub fn stop(mut self) -> Result<(), Error> {
+        self.call("stop", ())
+    }
+
     /// The event socket, one message per line, starting with the greeting
     /// and a snapshot.
     pub fn subscribe(runtime: &Runtime) -> Result<BufReader<UnixStream>, Error> {
@@ -97,6 +128,16 @@ impl Client {
             source,
         })?;
         Ok(BufReader::new(stream))
+    }
+}
+
+/// Whether the daemon that answered with `hello` runs a binary other than
+/// `binary`, symlinks resolved. A `binary` that is gone compares equal:
+/// there is nothing to replace the daemon with.
+pub fn from_another_binary(hello: &HelloResult, binary: &Path) -> bool {
+    match fs::canonicalize(binary) {
+        Ok(path) => path.to_string_lossy() != hello.binary,
+        Err(_) => false,
     }
 }
 

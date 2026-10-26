@@ -56,8 +56,9 @@ tracon list
 
 If `tracon daemon --stop` reports no daemon but `lock` in that directory is
 held, a daemon runs that the sockets no longer reach; end it and try again.
-A daemon from an older installation answers with its version, and the
-check says so: stop it the same way.
+A daemon from another installation keeps running until the tmux
+configuration is reloaded, which replaces it; the check names the binary it
+runs. Stopping it the same way works too.
 
 ## The option mirror isn't running
 

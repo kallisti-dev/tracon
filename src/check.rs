@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use tracon::backend::TmuxBackend;
 use tracon::backend::tmux::setup;
-use tracon::client::Client;
+use tracon::client::{self, Client};
 use tracon::protocol::{self, HelloResult};
 use tracon::runtime::Runtime;
 use tracon::tmux::Tmux;
@@ -116,21 +116,25 @@ pub fn run(runtime: &Runtime, session: Option<&str>) -> Result<ExitCode> {
         report.problem(format!("a tracon option is invalid: {error}"));
     }
 
-    let hello = Client::connect(runtime).and_then(|mut client| {
-        client.call::<HelloResult>(
-            "hello",
-            protocol::Hello {
-                env: protocol::env(),
-            },
-        )
-    });
+    let hello = Client::connect(runtime).and_then(|mut client| client.hello());
     match hello {
-        Ok(hello) if hello.version == VERSION => {
-            report.ok(format!("the daemon runs tracon {}", hello.version));
-        }
-        Ok(hello) => report.problem(format!(
-            "the daemon runs tracon {}, but this is {VERSION}; run tracon daemon --stop, and it restarts on demand",
+        Ok(hello) if hello.version != VERSION => report.problem(format!(
+            "the daemon runs tracon {}, but this is {VERSION}; reload the tmux configuration, which replaces it",
             hello.version
+        )),
+        Ok(hello)
+            if !installed.binary.is_empty()
+                && client::from_another_binary(&hello, Path::new(&installed.binary)) =>
+        {
+            report.problem(format!(
+                "the daemon runs {}, not the tracon tmux is set up with; reload the tmux configuration, which replaces it",
+                binary_of(&hello)
+            ));
+        }
+        Ok(hello) => report.ok(format!(
+            "the daemon runs tracon {} from {}",
+            hello.version,
+            binary_of(&hello)
         )),
         Err(error) => report.problem(format!("the daemon did not answer: {error}")),
     }
@@ -181,6 +185,15 @@ pub fn run(runtime: &Runtime, session: Option<&str>) -> Result<ExitCode> {
             report.problems
         );
         Ok(ExitCode::FAILURE)
+    }
+}
+
+/// The binary a daemon says it runs, for the report.
+fn binary_of(hello: &HelloResult) -> &str {
+    if hello.binary.is_empty() {
+        "a binary that no longer exists"
+    } else {
+        &hello.binary
     }
 }
 

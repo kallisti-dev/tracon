@@ -127,8 +127,9 @@ tracon unpin [%3]
 `tracon` here is the binary recorded in the tmux option `@tracon-bin`.
 
 Every command talks to a daemon that starts on demand and keeps running
-until `tracon daemon --stop`; it lives in `$XDG_RUNTIME_DIR/tracon`, or
-`/tmp/tracon-<uid>`. For tmux status lines and scripts, the tmux plugin
+until `tracon daemon --stop`, or until a reload of the tmux configuration
+finds it running from another binary and replaces it; it lives in
+`$XDG_RUNTIME_DIR/tracon`, or `/tmp/tracon-<uid>`. For tmux status lines and scripts, the tmux plugin
 mirrors each pane's state into its options, `#{@tracon_state}` and the
 others listed in the [design](docs/design.md#mirror), and `tmux wait-for
 tracon` returns after every change.

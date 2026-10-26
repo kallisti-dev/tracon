@@ -142,9 +142,12 @@ The daemon (`src/daemon.rs`) holds every record in memory, keyed by pane,
 and runs the backends, on tokio. It starts on demand: a client that finds
 no socket spawns `tracon daemon` in its own process group and retries, so
 nothing has to be installed or supervised, and `tracon setup` greets it
-when tmux loads so it knows the server before the first hook. `tracon
-daemon --stop` ends it. One lock file keeps it to one daemon per runtime
-directory.
+when tmux loads so it knows the server before the first hook. A daemon
+running from another binary than the one setting up, left by an earlier
+installation, is stopped then and replaced, so an upgrade takes effect when
+tmux reloads. `tracon daemon --stop` ends it; the answer comes once the
+sockets and the lock are released, so the next command starts a fresh one
+at once. One lock file keeps it to one daemon per runtime directory.
 
 The runtime directory is `$TRACON_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/tracon`,
 else `/tmp/tracon-<uid>`, readable by its user alone. It holds:

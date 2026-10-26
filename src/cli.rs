@@ -10,7 +10,7 @@ use tracon::backend::tmux::mirror;
 use tracon::backend::tmux::setup;
 use tracon::client::Client;
 use tracon::list::Entry;
-use tracon::protocol::{self, HelloResult, NextResult};
+use tracon::protocol::{self, NextResult};
 use tracon::runtime::Runtime;
 use tracon::tmux::{self as tmux_util, Tmux};
 use tracon::{Locator, daemon};
@@ -180,16 +180,9 @@ fn dispatch(command: Command) -> Result<ExitCode> {
                 let binary = std::env::current_exe().context("locating the tracon binary")?;
                 setup::install(&tmux, &binary, dir.as_deref(), VERSION)?;
                 // Start the daemon now, so it knows this server before the
-                // first hook, and say so rather than fail the tmux load.
-                let hello = Client::connect(&runtime).and_then(|mut client| {
-                    client.call::<HelloResult>(
-                        "hello",
-                        protocol::Hello {
-                            env: protocol::env(),
-                        },
-                    )
-                });
-                if let Err(error) = hello {
+                // first hook, replacing one left by an earlier installation,
+                // and say so rather than fail the tmux load.
+                if let Err(error) = Client::connect_current(&runtime) {
                     eprintln!("tracon: the daemon did not start: {error:#}");
                 }
             }
@@ -212,7 +205,7 @@ fn dispatch(command: Command) -> Result<ExitCode> {
                 .block_on(mirror::run(&runtime, &server))?;
         }
         Command::Daemon { stop: true } => match Client::connect_running(&runtime) {
-            Ok(mut client) => client.call::<()>("stop", ())?,
+            Ok(client) => client.stop()?,
             Err(tracon::Error::Daemon { .. }) => {}
             Err(error) => return Err(error.into()),
         },
