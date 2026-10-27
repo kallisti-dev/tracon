@@ -28,9 +28,9 @@ use crate::list::{self, Entry};
 use crate::protocol::{self, Message, Request, Response, RpcError, Stored};
 use crate::runtime::Runtime;
 use crate::state::Record;
-use crate::store::{Change, Cond, Field, Guarded, MemoryStore, Update};
+use crate::store::{Change, Field, Guarded, MemoryStore};
 use crate::tmux::{self, Tmux};
-use crate::{Config, Error, State};
+use crate::{Config, Error, Outcome};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -39,16 +39,6 @@ const SUBSCRIBER_TIMEOUT: Duration = Duration::from_secs(1);
 /// Changes a slow subscriber may fall behind by before it is dropped; it
 /// reconnects for a fresh snapshot.
 const SUBSCRIBER_BACKLOG: usize = 1024;
-
-/// A finished pane becomes idle once seen; any other state is left alone.
-pub fn seen() -> Guarded {
-    let mut update = Update::new(State::known(State::IDLE));
-    update.agent = Field::Clear;
-    Guarded::when(
-        Change::Set(update),
-        Cond::StateUnder(State::known(State::DONE)),
-    )
-}
 
 /// The backends the daemon talks to: one per tmux server it has heard of,
 /// from a client's environment or from the journal.
@@ -210,7 +200,8 @@ impl Daemon {
         }
     }
 
-    /// Record that a client views `pane` now, and mark a finished turn seen.
+    /// Record that a client views `pane` now, which is what makes a finished
+    /// turn seen.
     fn view(&self, inner: &mut Inner, pane: &Locator, now: u64) {
         let outcome = inner
             .store
@@ -219,7 +210,6 @@ impl Daemon {
         if let Some(record) = outcome {
             self.changed(inner, pane, record.as_ref());
         }
-        self.apply(inner, pane, &seen(), now);
     }
 
     /// Journal and publish a changed record, or its removal.
@@ -309,7 +299,7 @@ impl Daemon {
             // The focus hook only fires on a change of focus, so a turn that
             // ends in view is seen here.
             let finishes = matches!(&change.change, Change::Set(update)
-                if update.state.is_under(&State::known(State::DONE)));
+                if update.outcome == Field::Set(Outcome::Finished));
             if finishes
                 && inner
                     .backends
@@ -406,6 +396,7 @@ impl Daemon {
         let config = Self::config(&mut inner, &params.env)?;
         Ok(protocol::SettingsResult {
             preview_interval_ms: config.preview_interval.as_millis() as u64,
+            format: config.format.source().to_owned(),
         })
     }
 

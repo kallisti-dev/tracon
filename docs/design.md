@@ -23,26 +23,63 @@ plugin is a directory with `.claude-plugin/plugin.json` and
 claude`. In the Nix packages, each half's `bin/tracon` links to the same
 binary. Nothing is written into Claude Code's settings.
 
-## States
+## State, status and label
 
-States form a tree, and a rule naming a state matches every state beneath
-it. Adapters report the most specific state their harness distinguishes:
+What a pane shows is built in three layers, each a function of the one
+before, so that what the hooks say, what the user cares about and how it is
+drawn can change independently.
+
+**State** is what the hooks record, per pane (`src/state.rs`): the agent's
+activity, `working`, `waiting.permission`, `waiting.question` or `ready`;
+the `outcome` of the last turn, `finished` or `error`, until the next prompt
+clears it; the number of `background` tasks running when the turn ended;
+`since`, when the state or outcome last changed; `viewed`, when a client
+last focused the pane; and the message, harness, session, agent and pin.
+Nothing derived is stored, so focusing a pane only records `viewed`.
+Adapters report the most specific state their harness distinguishes.
+
+**Status** is what the user cares about, computed when the list is built
+from the state and, as a last resort, from what the screen shows
+(`src/status.rs`). Statuses form a tree, and a rule naming one matches
+every status beneath it:
 
 ```
-waiting                needs you, reason unknown
+waiting                needs you
   waiting.permission
   waiting.question     a question, a plan to approve, or an MCP elicitation
-error
-done                   turn finished, not yet looked at
-idle                   seen, or never prompted
+error                  the turn ended with an error
+done                   the turn finished and the pane wasn't focused since
 working
-  working.background   turn ended but background tasks still run
+idle                   nothing running: seen, or never prompted
+  idle.interrupted     the screen shows the turn was interrupted
 unknown                agent process present, no hook has reported
 ```
 
-`unknown` is never stored. The list derives it for a pane with no state whose
-foreground command is a known harness, such as `claude` or Nix's
-`.claude-wrapped`.
+The first rule that applies gives the status:
+
+| State | Sighting | Status |
+| --- | --- | --- |
+| `waiting.*` | the spinner | `working` |
+| `waiting.*`, `working` | the interrupt notice, or a finished turn with no prompt after it | `idle.interrupted` |
+| `waiting.*` | | the same |
+| `working` | | `working` |
+| `ready`, outcome `error` | | `error` |
+| `ready`, outcome `finished`, not seen | | `done` |
+| `ready` otherwise | | `idle` |
+
+Seen means `viewed` is at or after `since`. `error` ignores it, so a failed
+turn stays visible until the next prompt. Background tasks and pins modify
+a status rather than make one: a row reads "done · 2 in background", and
+`@tracon-order` names `background` and `pinned` alongside statuses.
+`unknown` is derived for a pane with no state whose foreground command is a
+known harness, such as `claude` or Nix's `.claude-wrapped`.
+
+**Label** is how a status is shown (`src/label.rs`, `src/format.rs`): a
+label, an icon and a style per status, looked up along the tree so that an
+entry for `waiting` covers both waits, and a format string that composes a
+row from them and the pane's other variables. `list --json` carries all
+three layers. The [README](../README.md#configuration) describes the
+options.
 
 State is keyed by pane, never by the harness's session id, because `/clear`
 and `--resume` change the session id inside one pane. The session id is kept
@@ -53,10 +90,11 @@ one.
 
 An adapter turns each payload into a change and a condition on the pane's
 current record, which the daemon applies in one step under its lock. A
-change enters a state, keeping `since` when the pane is already in that
-exact state so repeated events don't reset the wait, and sets, keeps or
-clears the message, harness, session and agent. Conditions combine "the
-state is under S", "the wait was raised by agent A" and "the session is S".
+change enters a state; sets, keeps or clears the outcome, message, harness,
+session and agent; and sets the background count when the event reports
+it. `since` is kept when the state and outcome are unchanged, so repeated
+events don't reset the wait. Conditions combine "the state is under S",
+"the wait was raised by agent A" and "the session is S".
 `Guarded::apply_to` in `src/store/mod.rs` is the semantics; the tests replay
 a sequence of events through the daemon and compare its mirror in tmux with
 it at each step.
@@ -67,16 +105,16 @@ it at each step.
 
 | Event | Change | Condition |
 | --- | --- | --- |
-| `SessionStart` (not after compaction) | `idle`, record the session | always |
-| `UserPromptSubmit` | `working`, with the prompt as message | always; for a background task's notification, no subagent waits |
+| `SessionStart` (not after compaction) | `ready`, no outcome, no background tasks, record the session | always |
+| `UserPromptSubmit` | `working`, no outcome, with the prompt as message | always; for a background task's notification, no subagent waits |
 | `PreToolUse` for `AskUserQuestion` or `ExitPlanMode` | `waiting.question` | always |
 | `PermissionRequest` | `waiting.question` for those tools, otherwise `waiting.permission` | always |
 | `Elicitation` | `waiting.question` | always |
 | `Notification` `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog` | `waiting.permission` or `waiting.question` | not already waiting |
-| `Notification` `idle_prompt` | `idle` | not `done` or `working.background` |
+| `Notification` `idle_prompt` | `ready`, no outcome | not already `ready` |
 | `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `ElicitationResult` | `working` | see below |
-| `Stop` | `done`, or `working.background` with background tasks | no subagent waits |
-| `StopFailure` | `error`, with the error as message | no subagent waits |
+| `Stop` | `ready`, outcome `finished`, the count of background tasks | no subagent waits |
+| `StopFailure` | `ready`, outcome `error`, with the error as message | no subagent waits |
 | `SubagentStop` | `working` | that subagent's wait |
 | `SessionEnd` | clear the pane's state | the session matches |
 
@@ -94,9 +132,9 @@ The permission notification repeats PermissionRequest about six seconds
 later, and also follows AskUserQuestion and ExitPlanMode, so it only raises a
 wait when none is shown; on its own it covers sandboxed network requests,
 which fire nothing else. `idle_prompt` ends a wait or turn that Claude Code
-didn't report ending, but leaves `done` until the pane is seen, and
-`working.background` until Claude takes the tasks' results, since the prompt
-sits idle while they run.
+didn't report ending, with no outcome since how it ended is unknown. A pane
+already `ready` keeps its outcome and background count, so a finished turn
+stays `done` until seen while the prompt sits idle.
 
 Compaction leaves the state alone. Claude Code compacts mid-turn when the
 context fills, but also at `/compact` and on its own while a session idles,
@@ -122,19 +160,18 @@ says what it recognises there (`Harness::read_screen`):
 
 A dialog outranks a spinner, and a spinner outranks what an earlier turn
 left. A prompt cancelled before Claude replied disappears from the screen,
-so the turn before it is the last one shown. `src/screen.rs` then corrects the listed state, for every harness
-alike:
-
-| Recorded | Sighting | Listed |
-| --- | --- | --- |
-| `waiting` | `working` | `working` |
-| `waiting`, `working` | `interrupted`, `finished` | `idle` |
+so the turn before it is the last one shown. The status function then takes
+the sighting into account, for every harness alike: a `working` sighting
+makes a waiting pane `working`, and `interrupted` or `finished` makes a
+waiting or working pane `idle.interrupted`. Only panes in those states have
+their screens read.
 
 Nothing is written, so the hooks remain the only writers. Every correction
 needs a sighting, so a screen the harness doesn't recognise, as after a
-Claude Code update changes its text, leaves the recorded state. `list
---json` shows each pane's `sighting`. The patterns are tested against real
-screens kept in `tests/screens/`, one directory per Claude Code version.
+Claude Code update changes its text, leaves the status the state gives.
+`list --json` shows each pane's `sighting`. The patterns are tested against
+real screens kept in `tests/screens/`, one directory per Claude Code
+version.
 
 ## Daemon
 
@@ -192,8 +229,10 @@ options back:
 
 | Option | Meaning |
 | --- | --- |
-| `@tracon_state` | The state |
-| `@tracon_since` | Epoch seconds when the pane entered the state |
+| `@tracon_state` | The state: `working`, `waiting.permission`, `waiting.question` or `ready` |
+| `@tracon_outcome` | How the last turn ended, `finished` or `error`, until the next prompt |
+| `@tracon_background` | The number of background tasks still running, unset when none |
+| `@tracon_since` | Epoch seconds when the state or outcome last changed |
 | `@tracon_message` | One line about the state, such as the command awaiting permission |
 | `@tracon_harness` | The harness, such as `claude` |
 | `@tracon_session` | The harness session id |
@@ -212,10 +251,11 @@ its output when the locale isn't UTF-8, and the field separator in
 ## Ordering
 
 `order` is a list of rules. The first rule a pane matches decides its group:
-a state matches itself and the states beneath it, and `pinned` matches pinned
-panes. Within a group, the pane that entered its state first is listed
-first. Panes that match no rule go last. The default is `waiting pinned error
-done working idle unknown`, and the tmux option `@tracon-order` replaces it.
+a status matches itself and the statuses beneath it, `pinned` matches pinned
+panes and `background` panes with background tasks. Within a group, the
+pane that entered its state first is listed first. Panes that match no rule
+go last. The default is `waiting pinned error done working idle unknown`,
+and the tmux option `@tracon-order` replaces it.
 
 `recent_first` names the groups that sort by when a client last focused the
 pane instead, most recent first, then panes never focused, newest state
@@ -233,11 +273,12 @@ one tmux call. The client is the one given with `--client` or
 recently active client. With no client attached, focus reports that rather
 than spawning a terminal.
 
-`done` becomes `idle` when the pane gains focus: setup registers a
-`pane-focus-in` hook that runs `tracon seen`. tmux reports focus only with
-`focus-events on`. That hook doesn't fire for a pane that already has focus,
-so the hook command also marks a finished turn seen when a client whose
-terminal has focus shows the pane.
+A finished pane lists as `idle` rather than `done` once a client focuses
+it: setup registers a `pane-focus-in` hook that runs `tracon seen`, which
+records the time in `viewed`. tmux reports focus only with `focus-events
+on`. That hook doesn't fire for a pane that already has focus, so the hook
+command also records a view when a turn finishes in a pane that a client
+whose terminal has focus shows.
 
 ## Setup
 
@@ -269,7 +310,9 @@ without starting a daemon.
 
 | Component | Responsibility |
 | --- | --- |
-| `src/state.rs` | States, records, rules and ordering |
+| `src/state.rs` | States, outcomes and records |
+| `src/status.rs` | The status function, rules and ordering |
+| `src/label.rs`, `src/format.rs` | Labels, icons and styles per status, and the format strings that render rows |
 | `src/store/` | Guarded changes and the in-memory store |
 | `src/daemon.rs`, `src/protocol.rs`, `src/journal.rs`, `src/runtime.rs` | The daemon, its messages, its journal and its directory |
 | `src/client.rs` | The client every command uses, which starts the daemon on demand |

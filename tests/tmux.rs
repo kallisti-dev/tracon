@@ -276,16 +276,33 @@ impl Server {
             .find(|entry| entry["pane"]["id"] == pane)
     }
 
-    /// Give `pane` a state before the daemon starts, through its journal.
-    fn seed(&self, pane: &str, state: &str, since: u64) {
+    /// The listed status of `pane`, empty when it has none or isn't listed.
+    fn status(&self, pane: &str) -> String {
+        self.entry(pane)
+            .and_then(|entry| entry["status"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Wait for the list to show `expected` as the pane's status.
+    fn status_becomes(&self, pane: &str, expected: &str) {
+        wait_until(
+            &format!("status of {pane} is {expected:?}"),
+            Duration::from_secs(10),
+            || (self.status(pane) == expected).then_some(()),
+        );
+    }
+
+    /// Give `pane` a record before the daemon starts, through its journal.
+    fn seed(&self, pane: &str, mut record: Value, since: u64) {
         assert!(
             !self.runtime.join("rpc.sock").exists(),
             "seed before the daemon starts"
         );
         fs::create_dir_all(&self.runtime).unwrap();
+        record["since"] = json!(since);
         let line = json!({
             "pane": { "backend": "tmux", "id": pane, "server": self.socket },
-            "record": { "state": state, "since": since },
+            "record": record,
         });
         let mut journal = fs::OpenOptions::new()
             .append(true)
@@ -315,13 +332,14 @@ impl Server {
         serde_json::from_str(&self.tracon("%0", &["list", "--json"])).unwrap()
     }
 
+    /// Each listed pane with its status, in list order.
     fn listed(&self) -> Vec<(String, String)> {
         self.list()
             .iter()
             .map(|entry| {
                 (
                     entry["pane"]["id"].as_str().unwrap().to_owned(),
-                    entry["state"].as_str().unwrap_or("").to_owned(),
+                    entry["status"].as_str().unwrap_or("").to_owned(),
                 )
             })
             .collect()
@@ -458,9 +476,10 @@ fn bash(agent: Option<&str>) -> Value {
 fn hooks_record_state_and_the_mirror_follows() {
     let server = Server::start();
     server.hook("%0", event("SessionStart", json!({ "source": "startup" })));
-    server.state_becomes("%0", "idle");
+    server.state_becomes("%0", "ready");
     assert_eq!(server.option("%0", "@tracon_harness"), "claude");
     assert_eq!(server.option("%0", "@tracon_session"), SESSION);
+    assert_eq!(server.status("%0"), "idle");
 
     server.hook("%0", event("PermissionRequest", bash(None)));
     server.state_becomes("%0", "waiting.permission");
@@ -474,7 +493,25 @@ fn hooks_record_state_and_the_mirror_follows() {
     );
     assert_eq!(entry["location"], "work:0.0");
     assert_eq!(entry["state"], "waiting.permission");
+    assert_eq!(entry["status"], "waiting.permission");
+    assert_eq!(entry["label"], "needs approval");
+    assert_eq!(entry["icon"], "?");
     assert_eq!(entry["harness"], "claude");
+
+    server.hook(
+        "%0",
+        event("Stop", json!({ "background_tasks": [{ "id": "a" }] })),
+    );
+    server.state_becomes("%0", "ready");
+    server.option_becomes("%0", "@tracon_outcome", "finished");
+    assert_eq!(server.option("%0", "@tracon_background"), "1");
+    let entry = server.entry("%0").unwrap();
+    assert_eq!(entry["status"], "done");
+    assert_eq!(entry["background"], 1);
+    let row = server.tracon("%0", &["list"]);
+    assert!(row.contains("✓ done"), "{row}");
+    assert!(row.contains("work:0.0"), "{row}");
+    assert!(row.trim_end().ends_with("· 1 in background"), "{row}");
 }
 
 #[test]
@@ -537,6 +574,13 @@ fn hooks_match_the_reference_semantics() {
             .as_ref()
             .map_or(Value::Null, |state| Value::String(state.to_string()));
         assert_eq!(entry["state"], state, "step {step}: {payload}");
+        let outcome = reference.outcome.map_or(Value::Null, |outcome| {
+            Value::String(outcome.as_str().to_owned())
+        });
+        assert_eq!(entry["outcome"], outcome, "step {step}");
+        if reference.state.is_some() {
+            assert_eq!(entry["background"], reference.background, "step {step}");
+        }
         assert_eq!(entry["message"], text(&reference.message), "step {step}");
         assert_eq!(entry["agent"], text(&reference.agent), "step {step}");
         assert_eq!(entry["session"], text(&reference.session), "step {step}");
@@ -571,12 +615,16 @@ fn hooks_succeed_quietly_outside_tmux_and_report_bad_input() {
 fn panes_are_ordered_by_priority_then_wait_and_pins_apply() {
     let server = Server::start();
     let panes: Vec<String> = (0..4).map(|_| server.new_window("work")).collect();
-    server.seed("%0", "idle", 1);
-    server.seed(&panes[0], "done", 20);
-    server.seed(&panes[1], "waiting.question", 30);
-    server.seed(&panes[2], "waiting.permission", 10);
-    server.seed(&panes[3], "working", 5);
-    let pane = |id: &str, state: &str| (id.to_owned(), state.to_owned());
+    server.seed("%0", json!({ "state": "ready" }), 1);
+    server.seed(
+        &panes[0],
+        json!({ "state": "ready", "outcome": "finished" }),
+        20,
+    );
+    server.seed(&panes[1], json!({ "state": "waiting.question" }), 30);
+    server.seed(&panes[2], json!({ "state": "waiting.permission" }), 10);
+    server.seed(&panes[3], json!({ "state": "working" }), 5);
+    let pane = |id: &str, status: &str| (id.to_owned(), status.to_owned());
     assert_eq!(
         server.listed(),
         [
@@ -601,7 +649,46 @@ fn panes_are_ordered_by_priority_then_wait_and_pins_apply() {
     server.tmux(&["set-option", "-g", "@tracon-order", "waiting Bad"]);
     let output = server.tracon_output("%0", &["list"], None);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid state \"Bad\""));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("invalid @tracon-order: invalid status \"Bad\"")
+    );
+}
+
+#[test]
+fn labels_icons_and_the_format_are_options() {
+    let server = Server::start();
+    server.hook("%0", event("PermissionRequest", bash(None)));
+    // An entry covers the statuses beneath it that have none of their own.
+    server.tmux(&[
+        "set-option",
+        "-g",
+        "@tracon-labels",
+        "waiting.permission=approve?,done=unread",
+    ]);
+    server.tmux(&["set-option", "-g", "@tracon-icons", "waiting=!"]);
+    server.tmux(&[
+        "set-option",
+        "-g",
+        "@tracon-format",
+        "{icon} {label} \\({status}\\) {location}",
+    ]);
+    let entry = server.entry("%0").unwrap();
+    assert_eq!(entry["label"], "approve?");
+    assert_eq!(entry["icon"], "!");
+    assert_eq!(
+        server.tracon("%0", &["list"]),
+        "! approve? (waiting.permission) work:0.0\n"
+    );
+
+    server.tmux(&["set-option", "-g", "@tracon-format", "{icon} {colour}"]);
+    let output = server.tracon_output("%0", &["list"], None);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("invalid @tracon-format: unknown variable {colour}"),
+        "{output:?}"
+    );
 }
 
 #[test]
@@ -611,6 +698,8 @@ fn a_pinned_pane_without_an_agent_is_listed() {
     let list = server.list();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["state"], Value::Null);
+    assert_eq!(list[0]["status"], Value::Null);
+    assert_eq!(list[0]["label"], "");
 }
 
 #[test]
@@ -656,17 +745,22 @@ fn focusing_a_finished_pane_marks_it_seen() {
         event("Stop", json!({ "last_assistant_message": "All done" })),
     );
     server.hook(&other, event("PermissionRequest", bash(None)));
-    server.state_becomes("%0", "done");
+    server.state_becomes("%0", "ready");
+    assert_eq!(server.status("%0"), "done");
 
     server.tracon("%0", &["focus", "%0", "--client", &client]);
-    wait_until("the pane is seen", Duration::from_secs(10), || {
-        (server.state("%0") == "idle").then_some(())
-    });
+    server.status_becomes("%0", "idle");
+    // Being seen changes nothing the hooks recorded.
+    assert_eq!(server.state("%0"), "ready");
+    assert_eq!(server.option("%0", "@tracon_outcome"), "finished");
     assert_eq!(server.option("%0", "@tracon_message"), "All done");
     // Seeing a pane doesn't answer its prompt.
     server.tracon("%0", &["focus", &other, "--client", &client]);
     server.tracon("%0", &["seen", &other]);
-    assert_eq!(server.entry(&other).unwrap()["state"], "waiting.permission");
+    assert_eq!(
+        server.entry(&other).unwrap()["status"],
+        "waiting.permission"
+    );
 }
 
 #[test]
@@ -704,11 +798,11 @@ fn stale_panes_are_listed_from_what_their_screen_shows() {
             "Enter",
         ]);
     }
-    let pane = |id: &str, state: &str| (id.to_owned(), state.to_owned());
+    let pane = |id: &str, status: &str| (id.to_owned(), status.to_owned());
     let expected = [
         pane("%0", "working"),
-        pane(&refused, "idle"),
-        pane(&cancelled, "idle"),
+        pane(&refused, "idle.interrupted"),
+        pane(&cancelled, "idle.interrupted"),
     ];
     wait_until(
         "the panes are listed from their screens",
@@ -739,24 +833,25 @@ fn a_turn_that_ends_in_view_is_seen() {
     let finished = event("Stop", json!({ "last_assistant_message": "All done" }));
     server.hook("%0", finished.clone());
     server.hook(&hidden, finished);
-    server.state_becomes("%0", "idle");
-    assert_eq!(server.option("%0", "@tracon_message"), "All done");
-    server.state_becomes(&hidden, "done");
+    server.status_becomes("%0", "idle");
+    server.option_becomes("%0", "@tracon_message", "All done");
+    assert!(!server.option("%0", "@tracon_viewed").is_empty());
+    server.status_becomes(&hidden, "done");
+    assert_eq!(server.option(&hidden, "@tracon_viewed"), "");
 }
 
 #[test]
 fn a_pane_viewed_last_leads_the_idle_group() {
     let mut server = Server::start();
     let panes: Vec<String> = (0..3).map(|_| server.new_window("work")).collect();
-    server.seed(&panes[0], "idle", 10);
-    server.seed(&panes[1], "idle", 20);
+    server.seed(&panes[0], json!({ "state": "ready" }), 10);
+    server.seed(&panes[1], json!({ "state": "ready" }), 20);
     server.setup();
     server.hook(&panes[2], event("Stop", json!({})));
     let client = server.attach("work");
     server.tracon("%0", &["focus", &panes[2], "--client", &client]);
-    wait_until("the pane is seen", Duration::from_secs(10), || {
-        (server.state(&panes[2]) == "idle").then_some(())
-    });
+    server.status_becomes(&panes[2], "idle");
+    server.option_becomes(&panes[2], "@tracon_state", "ready");
     assert!(!server.option(&panes[2], "@tracon_viewed").is_empty());
     server.tracon("%0", &["focus", "%0", "--client", &client]);
     // Panes never viewed follow, newest state first.
@@ -781,7 +876,7 @@ fn the_daemon_starts_on_demand_and_replays_its_journal() {
     server.hook("%0", event("SessionStart", json!({})));
     server.hook(&gone, event("SessionStart", json!({})));
     assert!(server.runtime.join("rpc.sock").exists());
-    server.state_becomes("%0", "idle");
+    server.state_becomes("%0", "ready");
 
     server.tracon("%0", &["daemon", "--stop"]);
     // Answered once the directory is free for the next daemon.
@@ -790,9 +885,9 @@ fn the_daemon_starts_on_demand_and_replays_its_journal() {
     // mirror of the rest is written afresh.
     server.tmux(&["kill-pane", "-t", &gone]);
     server.tmux(&["set-option", "-pu", "-t", "%0", "@tracon_state"]);
-    let pane = |id: &str, state: &str| (id.to_owned(), state.to_owned());
+    let pane = |id: &str, status: &str| (id.to_owned(), status.to_owned());
     assert_eq!(server.listed(), [pane("%0", "idle")]);
-    server.state_becomes("%0", "idle");
+    server.state_becomes("%0", "ready");
     let journal = fs::read_to_string(server.runtime.join("journal.jsonl")).unwrap();
     assert!(journal.contains(r#""id":"%0""#), "{journal}");
     assert!(!journal.contains(&format!(r#""id":"{gone}""#)), "{journal}");
@@ -929,7 +1024,7 @@ fn every_registered_claude_hook_runs() {
     }
     assert!(events >= 14, "{events} hooks");
     run("SessionStart", groups_command(&hooks, "SessionStart"));
-    server.state_becomes("%0", "idle");
+    server.state_becomes("%0", "ready");
     run("SessionEnd", &session_end.expect("a SessionEnd hook"));
     server.state_becomes("%0", "");
 }
@@ -957,8 +1052,7 @@ fn the_picker_lists_previews_and_focuses() {
     ]);
     let screen = wait_until("the picker draws", Duration::from_secs(10), || {
         let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
-        (screen.contains("waiting.permission") && screen.contains("preview-marker"))
-            .then_some(screen)
+        (screen.contains("? needs approval") && screen.contains("preview-marker")).then_some(screen)
     });
     assert!(screen.contains("agents:0.0"), "{screen}");
 
@@ -1004,7 +1098,7 @@ fn the_picker_fits_a_short_pane() {
     ]);
     wait_until("the picker draws", Duration::from_secs(10), || {
         let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
-        screen.contains("waiting.permission").then_some(())
+        screen.contains("needs approval").then_some(())
     });
 }
 
@@ -1028,7 +1122,7 @@ fn setup_replaces_a_daemon_from_another_binary() {
     let output = server.command(&old).arg("list").output().unwrap();
     assert!(output.status.success(), "{output:?}");
     server.hook("%0", event("SessionStart", json!({})));
-    server.state_becomes("%0", "idle");
+    server.state_becomes("%0", "ready");
     let runs_from = |binary: &Path| {
         format!(
             "ok       the daemon runs tracon {} from {}",

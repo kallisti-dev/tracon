@@ -216,6 +216,9 @@ pub struct Settings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsResult {
     pub preview_interval_ms: u64,
+    /// The row format, as `@tracon-format` or the default gives it.
+    #[serde(default)]
+    pub format: String,
 }
 
 /// A record as the event socket carries it.

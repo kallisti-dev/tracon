@@ -12,7 +12,7 @@ use tracon::client::{self, Client};
 use tracon::protocol::{self, HelloResult};
 use tracon::runtime::Runtime;
 use tracon::tmux::Tmux;
-use tracon::{Config, State};
+use tracon::{Config, Status};
 
 use crate::cli::{VERSION, entries};
 
@@ -146,9 +146,9 @@ pub fn run(runtime: &Runtime, session: Option<&str>) -> Result<ExitCode> {
         .iter()
         .filter(|entry| {
             entry
-                .state
+                .status
                 .as_ref()
-                .is_some_and(|state| state.as_str() == State::UNKNOWN)
+                .is_some_and(|status| status.as_str() == Status::UNKNOWN)
         })
         .map(|entry| entry.location.as_str())
         .collect();

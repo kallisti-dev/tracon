@@ -7,7 +7,7 @@
 
 pub mod memory;
 
-use crate::state::{Record, State};
+use crate::state::{Outcome, Record, State};
 
 pub use memory::MemoryStore;
 
@@ -31,10 +31,13 @@ impl<T: Clone> Field<T> {
 }
 
 /// Enter a state. `since` is kept when the pane is already in that exact
-/// state, so repeated events don't reset the wait.
+/// state with the same outcome, so repeated events don't reset the wait.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Update {
     pub state: State,
+    pub outcome: Field<Outcome>,
+    /// The number of background tasks, when the event reports it.
+    pub background: Option<u32>,
     pub message: Field<String>,
     pub harness: Field<String>,
     pub session: Field<String>,
@@ -45,6 +48,8 @@ impl Update {
     pub fn new(state: State) -> Self {
         Update {
             state,
+            outcome: Field::Keep,
+            background: None,
             message: Field::Keep,
             harness: Field::Keep,
             session: Field::Keep,
@@ -127,10 +132,15 @@ impl Guarded {
                 }
             }
             Change::Set(update) => {
-                if record.state.as_ref() != Some(&update.state) {
+                let before = (record.state.clone(), record.outcome);
+                record.state = Some(update.state.clone());
+                update.outcome.apply(&mut record.outcome);
+                if (record.state.clone(), record.outcome) != before {
                     record.since = Some(now);
                 }
-                record.state = Some(update.state.clone());
+                if let Some(background) = update.background {
+                    record.background = background;
+                }
                 update.message.apply(&mut record.message);
                 update.harness.apply(&mut record.harness);
                 update.session.apply(&mut record.session);
@@ -158,14 +168,33 @@ mod tests {
     }
 
     #[test]
-    fn since_is_kept_while_the_state_is_unchanged() {
+    fn since_is_kept_while_the_state_and_outcome_are_unchanged() {
         let mut record = Record::default();
         let working = Guarded::always(Change::Set(Update::new(state("working"))));
         working.apply_to(&mut record, 10);
         working.apply_to(&mut record, 20);
         assert_eq!(record.since, Some(10));
-        Guarded::always(Change::Set(Update::new(state("done")))).apply_to(&mut record, 30);
+        let mut finished = Update::new(state("ready"));
+        finished.outcome = Field::Set(Outcome::Finished);
+        finished.background = Some(2);
+        Guarded::always(Change::Set(finished.clone())).apply_to(&mut record, 30);
         assert_eq!(record.since, Some(30));
+        assert_eq!(record.outcome, Some(Outcome::Finished));
+        assert_eq!(record.background, 2);
+        // The same again keeps the time; a kept outcome and count stay.
+        let mut again = Update::new(state("ready"));
+        again.background = None;
+        Guarded::always(Change::Set(again)).apply_to(&mut record, 40);
+        assert_eq!(record.since, Some(30));
+        assert_eq!(
+            (record.outcome, record.background),
+            (Some(Outcome::Finished), 2)
+        );
+        // A changed outcome in the same state starts a new wait.
+        finished.outcome = Field::Set(Outcome::Error);
+        Guarded::always(Change::Set(finished)).apply_to(&mut record, 50);
+        assert_eq!(record.since, Some(50));
+        assert_eq!(record.outcome, Some(Outcome::Error));
     }
 
     #[test]

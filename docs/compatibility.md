@@ -68,12 +68,13 @@ line.
 
 - **Interrupts and bare refusals.** Esc, Ctrl-C and "No" without a comment
   fire no hook, and `Stop` doesn't run after an interrupt, so the record
-  stays `waiting` or `working`. tracon lists the pane as `idle` while
+  stays `waiting` or `working`. tracon lists the pane as `interrupted` while
   Claude Code's interrupt notice is on screen; see
   [screen reading](design.md#screen-reading).
 - **Cancelled prompts.** A prompt cancelled before Claude replies fires
   `UserPromptSubmit` and nothing after it, so the record stays `working`.
-  tracon lists the pane as `idle` while the last turn on screen has ended.
+  tracon lists the pane as `interrupted` while the last turn on screen has
+  ended.
 - **Approval lag.** Nothing fires when a prompt is approved, so the record
   stays `waiting.permission` until the tool finishes. tracon lists such a pane
   as `working` while its screen shows Claude Code's spinner line and no dialog.

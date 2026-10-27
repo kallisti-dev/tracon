@@ -20,6 +20,8 @@ use crate::state::Record;
 use crate::tmux::{self, CHANNEL, SEPARATOR, Tmux};
 
 pub const STATE: &str = "@tracon_state";
+pub const OUTCOME: &str = "@tracon_outcome";
+pub const BACKGROUND: &str = "@tracon_background";
 pub const SINCE: &str = "@tracon_since";
 pub const MESSAGE: &str = "@tracon_message";
 pub const HARNESS: &str = "@tracon_harness";
@@ -42,6 +44,14 @@ fn options(record: Option<&Record>) -> Vec<(&'static str, Option<String>)> {
     let number = |value: Option<u64>| value.map(|value| value.to_string());
     vec![
         (STATE, record.state.map(|state| state.to_string())),
+        (
+            OUTCOME,
+            record.outcome.map(|outcome| outcome.as_str().to_owned()),
+        ),
+        (
+            BACKGROUND,
+            number(Some(u64::from(record.background)).filter(|count| *count > 0)),
+        ),
         (SINCE, number(record.since)),
         (MESSAGE, text(record.message)),
         (HARNESS, text(record.harness)),
@@ -265,12 +275,14 @@ async fn follow(runtime: &Runtime, tmux: &Tmux, server: &str) -> Result<(), Erro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::State;
+    use crate::{Outcome, State};
 
     #[test]
     fn every_option_is_set_or_unset() {
         let record = Record {
-            state: Some(State::known(State::DONE)),
+            state: Some(State::known(State::READY)),
+            outcome: Some(Outcome::Finished),
+            background: 3,
             since: Some(7),
             message: Some("it's #{done};".into()),
             pinned: true,
@@ -279,7 +291,9 @@ mod tests {
         let mut args = Vec::new();
         writes("%1", Some(&record), &mut args);
         let args = args.join(" ");
-        assert!(args.starts_with("set-option -p -t %1 @tracon_state done ;"));
+        assert!(args.starts_with("set-option -p -t %1 @tracon_state ready ;"));
+        assert!(args.contains("set-option -p -t %1 @tracon_outcome finished ;"));
+        assert!(args.contains("set-option -p -t %1 @tracon_background 3 ;"));
         assert!(args.contains("set-option -p -t %1 @tracon_since 7 ;"));
         // Arguments reach tmux verbatim, except a trailing semicolon.
         assert!(args.contains("set-option -p -t %1 @tracon_message it's #{done}\\; ;"));
@@ -288,7 +302,14 @@ mod tests {
         assert!(args.contains("set-option -pu -t %1 @tracon_viewed ;"));
         let mut cleared = Vec::new();
         writes("%1", None, &mut cleared);
-        assert_eq!(cleared.iter().filter(|arg| *arg == "-pu").count(), 8);
+        assert_eq!(cleared.iter().filter(|arg| *arg == "-pu").count(), 10);
+        // No background tasks is no option, for `#{?@tracon_background,…}`.
+        let mut idle = Vec::new();
+        writes("%1", Some(&Record::default()), &mut idle);
+        assert!(
+            idle.join(" ")
+                .contains("set-option -pu -t %1 @tracon_background ;")
+        );
         assert_eq!(argument(";"), "\\;");
         assert_eq!(argument("a;b"), "a;b");
     }

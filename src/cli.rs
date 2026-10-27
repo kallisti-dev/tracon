@@ -9,8 +9,9 @@ use tracon::backend::TmuxBackend;
 use tracon::backend::tmux::mirror;
 use tracon::backend::tmux::setup;
 use tracon::client::Client;
+use tracon::format;
 use tracon::list::Entry;
-use tracon::protocol::{self, NextResult};
+use tracon::protocol::{self, NextResult, SettingsResult};
 use tracon::runtime::Runtime;
 use tracon::tmux::{self as tmux_util, Tmux};
 use tracon::{Locator, daemon};
@@ -114,15 +115,20 @@ fn dispatch(command: Command) -> Result<ExitCode> {
     match command {
         Command::Hook { .. } => unreachable!("handled before dispatch"),
         Command::List { json } => {
-            let entries = entries(&runtime)?;
+            let env = protocol::env();
+            let mut client = Client::connect(&runtime)?;
+            let settings: SettingsResult =
+                client.call("settings", protocol::Settings { env: env.clone() })?;
+            let entries: Vec<Entry> = client.call("list", protocol::List { env })?;
             let mut out = std::io::stdout().lock();
             if json {
                 serde_json::to_writer_pretty(&mut out, &entries)?;
                 writeln!(out)?;
             } else {
+                let format = ui::row_format(&settings);
                 let now = tracon::now();
                 for entry in &entries {
-                    writeln!(out, "{}", ui::plain_row(entry, now))?;
+                    writeln!(out, "{}", format::plain(&entry.row(&format, now)))?;
                 }
             }
         }

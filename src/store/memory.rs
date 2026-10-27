@@ -80,7 +80,7 @@ mod tests {
         assert_eq!(store.get(&pane).unwrap().since, Some(5));
 
         let refused = Guarded::when(
-            Change::Set(Update::new(State::known(State::DONE))),
+            Change::Set(Update::new(State::known(State::READY))),
             Cond::StateUnder(State::known(State::WAITING)),
         );
         assert!(store.apply(&pane, &refused, 7).is_none());

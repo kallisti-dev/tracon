@@ -21,87 +21,56 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use tracon::client::Client;
+use tracon::format::{self, Colour, Template};
 use tracon::list::Entry;
 use tracon::protocol::{self, Env, SettingsResult};
 use tracon::runtime::Runtime;
-use tracon::{Locator, State};
+use tracon::{Config, Locator};
 
 /// The longest the picker waits for a key before checking for changes.
 const TICK: Duration = Duration::from_millis(100);
 /// Refreshes ages and catches changes made without the signal.
 const LIST_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How long ago `since` was, such as `42s`, `5m` or `3h`.
-pub fn age(since: Option<u64>, now: u64) -> String {
-    let Some(since) = since else {
-        return String::new();
+/// The row format the daemon's settings give, which it has checked; the
+/// default stands in for one from a newer daemon this build can't read.
+pub fn row_format(settings: &SettingsResult) -> Template {
+    Template::parse(&settings.format).unwrap_or_else(|_| Config::default().format)
+}
+
+fn style_of(style: &format::Style) -> Style {
+    let colour = |colour: Colour| match colour {
+        Colour::Indexed(index) => Color::Indexed(index),
+        Colour::Rgb(r, g, b) => Color::Rgb(r, g, b),
     };
-    let seconds = now.saturating_sub(since);
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m", seconds / 60),
-        3600..86400 => format!("{}h", seconds / 3600),
-        _ => format!("{}d", seconds / 86400),
+    let mut drawn = Style::new();
+    if let Some(fg) = style.fg {
+        drawn = drawn.fg(colour(fg));
     }
-}
-
-fn glyph(state: Option<&State>) -> (&'static str, Style) {
-    let root = state.map_or("", State::root);
-    match root {
-        "waiting" => (
-            "●",
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
-        "error" => (
-            "✗",
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        "done" => ("✓", Style::new().fg(Color::Green)),
-        "working" => ("◐", Style::new().fg(Color::Blue)),
-        "idle" => ("○", Style::new().fg(Color::Gray)),
-        "" => (" ", Style::new()),
-        _ => ("?", Style::new().fg(Color::DarkGray)),
+    if let Some(bg) = style.bg {
+        drawn = drawn.bg(colour(bg));
     }
+    for (set, modifier) in [
+        (style.bold, Modifier::BOLD),
+        (style.dim, Modifier::DIM),
+        (style.italic, Modifier::ITALIC),
+        (style.underline, Modifier::UNDERLINED),
+        (style.reversed, Modifier::REVERSED),
+    ] {
+        if set {
+            drawn = drawn.add_modifier(modifier);
+        }
+    }
+    drawn
 }
 
-/// The message, or the pane title when there is none.
-fn summary(entry: &Entry) -> &str {
-    entry
-        .message
-        .as_deref()
-        .filter(|m| !m.is_empty())
-        .unwrap_or(&entry.title)
-}
-
-/// One line per pane for `tracon list`.
-pub fn plain_row(entry: &Entry, now: u64) -> String {
-    format!(
-        "{}{} {:<18} {:>4}  {:<16} {:<7} {}",
-        if entry.pinned { "*" } else { " " },
-        glyph(entry.state.as_ref()).0,
-        entry.state.as_ref().map_or("-", State::as_str),
-        age(entry.since, now),
-        entry.location,
-        entry.harness.as_deref().unwrap_or(""),
-        summary(entry),
-    )
-}
-
-fn row(entry: &Entry, now: u64) -> ListItem<'static> {
-    let (glyph, style) = glyph(entry.state.as_ref());
-    ListItem::new(Line::from(vec![
-        Span::raw(if entry.pinned { "*" } else { " " }),
-        Span::styled(glyph, style),
-        Span::raw(" "),
-        Span::styled(
-            format!("{:<18}", entry.state.as_ref().map_or("-", State::as_str)),
-            style,
-        ),
-        Span::raw(format!("{:>4}  ", age(entry.since, now))),
-        Span::raw(format!("{:<16} ", entry.location)).bold(),
-        Span::raw(format!("{:<7} ", entry.harness.as_deref().unwrap_or(""))).dim(),
-        Span::raw(summary(entry).to_owned()),
-    ]))
+fn row(entry: &Entry, format: &Template, now: u64) -> ListItem<'static> {
+    let spans: Vec<Span<'static>> = entry
+        .row(format, now)
+        .into_iter()
+        .map(|span| Span::styled(span.text, style_of(&span.style)))
+        .collect();
+    ListItem::new(Line::from(spans))
 }
 
 /// Whether a captured line shows nothing: only spaces and escape sequences.
@@ -184,6 +153,7 @@ struct Picker<'a> {
     rpc: Client,
     env: Env,
     preview_interval: Duration,
+    format: Template,
     client: Option<&'a str>,
     entries: Vec<Entry>,
     /// Indices into `entries` that match the filter, in list order.
@@ -216,9 +186,10 @@ impl Picker<'_> {
             .filter(|&index| {
                 let entry = &self.entries[index];
                 let haystack = format!(
-                    "{} {} {} {} {}",
+                    "{} {} {} {} {} {}",
                     entry.location,
-                    entry.state.as_ref().map_or("", State::as_str),
+                    entry.label,
+                    entry.status.as_ref().map_or("", |status| status.as_str()),
                     entry.harness.as_deref().unwrap_or(""),
                     entry.title,
                     entry.message.as_deref().unwrap_or("")
@@ -288,7 +259,7 @@ impl Picker<'_> {
         let items: Vec<ListItem> = self
             .visible
             .iter()
-            .map(|&i| row(&self.entries[i], now))
+            .map(|&i| row(&self.entries[i], &self.format, now))
             .collect();
         let list = List::new(items)
             .block(
@@ -425,6 +396,7 @@ pub fn pick(runtime: &Runtime, client: Option<&str>) -> Result<()> {
         rpc,
         env,
         preview_interval: Duration::from_millis(settings.preview_interval_ms),
+        format: row_format(&settings),
         client,
         entries: Vec::new(),
         visible: Vec::new(),
@@ -477,13 +449,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ages_use_the_largest_whole_unit() {
-        assert_eq!(age(Some(100), 142), "42s");
-        assert_eq!(age(Some(0), 300), "5m");
-        assert_eq!(age(Some(0), 3 * 3600 + 5), "3h");
-        assert_eq!(age(Some(0), 2 * 86400), "2d");
-        assert_eq!(age(Some(10), 5), "0s");
-        assert_eq!(age(None, 5), "");
+    fn styles_are_drawn_as_given() {
+        let style = format::Style::parse("bold bg:blue #ff0000").unwrap();
+        let drawn = style_of(&style);
+        assert_eq!(drawn.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(drawn.bg, Some(Color::Indexed(4)));
+        assert!(drawn.add_modifier.contains(Modifier::BOLD));
+        assert!(!drawn.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]

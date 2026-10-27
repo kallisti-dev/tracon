@@ -9,13 +9,16 @@ pub mod backend;
 pub mod client;
 pub mod config;
 pub mod daemon;
+pub mod format;
 pub mod harness;
 pub mod journal;
+pub mod label;
 pub mod list;
 pub mod protocol;
 pub mod runtime;
 pub mod screen;
 pub mod state;
+pub mod status;
 pub mod store;
 pub mod tmux;
 
@@ -23,16 +26,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use backend::Locator;
 pub use config::Config;
-pub use state::{Record, Rule, State};
+pub use state::{Outcome, Record, State};
+pub use status::{Rule, Status};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("invalid state {0:?}")]
-    InvalidState(String),
     #[error("invalid pane {0:?}")]
     InvalidPane(String),
+    /// A value of some `kind`, such as a state or an option, that doesn't
+    /// parse.
     #[error("invalid {kind} {value:?}")]
-    InvalidId { kind: &'static str, value: String },
+    Invalid { kind: &'static str, value: String },
+    /// A configuration option whose value doesn't parse; the reason says
+    /// how.
+    #[error("invalid {option}: {reason}")]
+    InvalidOption {
+        option: &'static str,
+        reason: String,
+    },
+    /// A format string that doesn't parse; the message says where.
+    #[error("{0}")]
+    Template(String),
     #[error("unsupported backend {0:?}")]
     UnsupportedBackend(String),
     #[error("unknown harness {0:?}")]

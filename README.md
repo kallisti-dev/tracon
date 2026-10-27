@@ -91,27 +91,28 @@ Ctrl-u clears the filter, and Esc clears it and returns to the list.
 
 When no pane runs an agent, the key shows a message instead.
 
-Each pane is in one of these states. Hooks report the most specific state
-Claude Code distinguishes:
+Each pane is listed with a status, derived from what Claude Code's hooks
+reported, and shown with a label:
 
-| State | Meaning |
-| --- | --- |
-| `waiting.permission` | A permission prompt is waiting for you |
-| `waiting.question` | Claude asked a question or presented a plan, or an MCP server asked for input |
-| `error` | The turn ended with an API error |
-| `done` | The turn finished and you haven't looked at the pane since |
-| `working` | Claude is working |
-| `working.background` | The turn ended, but background tasks still run |
-| `idle` | You have seen the pane, or the session has had no prompt yet |
-| `unknown` | Claude Code runs in the pane, but no hook has reported |
+| Status | Shown as | Meaning |
+| --- | --- | --- |
+| `waiting.permission` | needs approval | A permission prompt is waiting for you |
+| `waiting.question` | has a question | Claude asked a question or presented a plan, or an MCP server asked for input |
+| `error` | failed | The turn ended with an API error |
+| `done` | done | The turn finished and you haven't looked at the pane since |
+| `working` | working | Claude is working |
+| `idle` | idle | You have seen the pane, or the session has had no prompt yet |
+| `idle.interrupted` | interrupted | You interrupted Claude, refused a prompt or cancelled one |
+| `unknown` | not reporting | Claude Code runs in the pane, but no hook has reported |
 
-A finished pane becomes `idle` when you focus it, or at once if it finishes
-while you are looking at it. Claude Code reports neither an approved prompt,
-nor an interrupt, nor a prompt you cancel before it replies, so tracon also
-reads the screen of a waiting or working pane: Claude's spinner lists it as
-`working`, and its interrupt notice, after Esc, Ctrl-C or a bare "No", or a
-finished turn with no prompt after it lists it as `idle`. See
-[compatibility](docs/compatibility.md) for details.
+Background tasks that outlive a turn show on the row, as in "done · 2 in
+background". A finished pane becomes `idle` when you focus it, or at once if
+it finishes while you are looking at it. Claude Code reports neither an
+approved prompt, nor an interrupt, nor a prompt you cancel before it
+replies, so tracon also reads the screen of a waiting or working pane:
+Claude's spinner lists it as `working`, and its interrupt notice, after Esc,
+Ctrl-C or a bare "No", or a finished turn with no prompt after it lists it
+as `interrupted`. See [compatibility](docs/compatibility.md) for details.
 
 The same list and actions are available as commands, for scripts and other
 front ends:
@@ -130,9 +131,10 @@ Every command talks to a daemon that starts on demand and keeps running
 until `tracon daemon --stop`, or until a reload of the tmux configuration
 finds it running from another binary and replaces it; it lives in
 `$XDG_RUNTIME_DIR/tracon`, or `/tmp/tracon-<uid>`. For tmux status lines and scripts, the tmux plugin
-mirrors each pane's state into its options, `#{@tracon_state}` and the
-others listed in the [design](docs/design.md#mirror), and `tmux wait-for
-tracon` returns after every change.
+mirrors what the hooks recorded for each pane into its options,
+`#{@tracon_state}`, `#{@tracon_outcome}` and the others listed in the
+[design](docs/design.md#mirror), and `tmux wait-for tracon` returns after
+every change.
 
 ## Configuration
 
@@ -146,24 +148,58 @@ before `programs.tmux.extraConfig`.
 | `@tracon-order` | `waiting pinned error done working idle unknown` | Groups the list is sorted into |
 | `@tracon-recent-first` | `working idle unknown` | Groups that list the pane you viewed last first |
 | `@tracon-preview-interval` | `100` | Milliseconds between refreshes of the picker's preview |
+| `@tracon-labels` | see above | Labels per status, as `status=label,…` |
+| `@tracon-icons` | `waiting=?,error=!,done=✓,working=◐,idle=○,unknown=·` | Icons per status |
+| `@tracon-styles` | `waiting=bold yellow,error=bold red,done=green,working=blue,idle=dim,unknown=dim` | Styles per status |
+| `@tracon-format` | see below | The row format for the picker and `tracon list` |
 
 Each preview refresh runs `tmux capture-pane` once. On a slow machine, a
 longer interval such as `500` makes the picker lighter at the cost of a
 choppier preview.
 
-`@tracon-order` is a list of states. Each pane goes in the group of the first
-state it matches, where a state also matches the states beneath it
-(`waiting` matches `waiting.permission`) and `pinned` matches pinned panes.
-Within a group, the pane that has been in its state longest comes first, so
-the oldest prompt is at the top. In the groups `@tracon-recent-first` names,
-the pane you focused most recently comes first instead, so a finished pane
-you just looked at stays near the top of the idle panes; panes you haven't
-focused follow, newest state first. Panes that match no entry go last. For
-example, to keep pinned panes at the top:
+`@tracon-order` is a list of statuses. Each pane goes in the group of the
+first status it matches, where a status also matches the statuses beneath
+it (`waiting` matches `waiting.permission`), `pinned` matches pinned panes
+and `background` matches panes with background tasks. Within a group, the
+pane that has been in its state longest comes first, so the oldest prompt
+is at the top. In the groups `@tracon-recent-first` names, the pane you
+focused most recently comes first instead, so a finished pane you just
+looked at stays near the top of the idle panes; panes you haven't focused
+follow, newest state first. Panes that match no entry go last. For example,
+to keep pinned panes at the top:
 
 ```tmux
 set -g @tracon-order 'pinned waiting error done working idle unknown'
 ```
+
+`@tracon-labels`, `@tracon-icons` and `@tracon-styles` each add to or
+replace the defaults, entry by entry. An entry for a status also covers the
+statuses beneath it unless they have entries of their own, so
+`waiting=needs you` labels both waits. A style is words such as `bold`,
+`dim`, `italic`, `underline` and `reversed`, a colour name, `bright-` and a
+name, `#rrggbb` or a number up to 255, and `bg:` before a colour for the
+background:
+
+```tmux
+set -g @tracon-labels 'waiting.permission=approve?,done=unread'
+set -g @tracon-styles 'done=bold green,idle=8'
+```
+
+`@tracon-format` composes a row, in the style of starship. `{var}` inserts
+a variable, `{message|title}` the first of several with a value, and
+`{label:<16}`, `{age:>4}` or `{title:^20}` pads to a width; `{title:.30}`
+cuts to a length. `[text](style)` styles what it encloses, and `({style})`
+is the status's style. `(…)` is a group shown only when a variable inside it
+has a value, and a backslash keeps the next character. The default is:
+
+```
+{pin:<1}[{icon} {label:<16}]({style}) {age:>4}  [{location:<18}](bold) [{harness:<7}](dim) {message|title}( · {background} in background)
+```
+
+The variables are `icon`, `label`, `status` and `style`; `state`, `outcome`
+and `background`, as the hooks recorded them; `age`, the time in the
+state; `location`, `harness`, `title` and `message`; and `pin`, `*` when
+the pane is pinned.
 
 ## Development
 

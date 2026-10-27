@@ -13,7 +13,7 @@ use serde_json::Value;
 use super::{Harness, command_is};
 use crate::screen::Sighting;
 use crate::store::{Change, Cond, Field, Guarded, Update, valid_id};
-use crate::{Error, State, one_line};
+use crate::{Error, Outcome, State, one_line};
 
 pub struct Claude;
 
@@ -135,7 +135,9 @@ impl Harness for Claude {
                 if text(payload, "source") == Some("compact") {
                     return Ok(None);
                 }
-                let mut update = set(State::IDLE);
+                let mut update = set(State::READY);
+                update.outcome = Field::Clear;
+                update.background = Some(0);
                 update.message = Field::Clear;
                 update.agent = Field::Clear;
                 guarded(update, Cond::Always)
@@ -155,6 +157,7 @@ impl Harness for Claude {
             "UserPromptSubmit" if agent.is_none() => {
                 let prompt = text(payload, "prompt").unwrap_or("");
                 let mut update = set(State::WORKING);
+                update.outcome = Field::Clear;
                 match task_notification(prompt) {
                     Some(notice) => {
                         update.message = message(notice);
@@ -207,21 +210,17 @@ impl Harness for Claude {
                     update.agent = Field::Clear;
                     guarded(update, unless_waiting())
                 }
-                // The input prompt has sat untouched, so any wait or work it
-                // shows is over. A finished turn stays `done` until seen, and
-                // background tasks run on while the prompt is idle.
+                // The input prompt has sat untouched, so a wait or turn it
+                // still shows ended some way Claude Code didn't report. A
+                // pane already ready keeps its outcome.
                 Some("idle_prompt") => {
-                    let mut update = set(State::IDLE);
+                    let mut update = set(State::READY);
+                    update.outcome = Field::Clear;
                     update.message = Field::Clear;
                     update.agent = Field::Clear;
                     guarded(
                         update,
-                        Cond::All(vec![
-                            Cond::negated(Cond::StateUnder(State::known(State::DONE))),
-                            Cond::negated(Cond::StateUnder(State::known(
-                                State::WORKING_BACKGROUND,
-                            ))),
-                        ]),
+                        Cond::negated(Cond::StateUnder(State::known(State::READY))),
                     )
                 }
                 _ => None,
@@ -249,17 +248,16 @@ impl Harness for Claude {
                 let background = payload
                     .get("background_tasks")
                     .and_then(Value::as_array)
-                    .is_some_and(|tasks| !tasks.is_empty());
-                let mut update = set(if background {
-                    State::WORKING_BACKGROUND
-                } else {
-                    State::DONE
-                });
+                    .map_or(0, |tasks| tasks.len() as u32);
+                let mut update = set(State::READY);
+                update.outcome = Field::Set(Outcome::Finished);
+                update.background = Some(background);
                 update.message = message(text(payload, "last_assistant_message").unwrap_or(""));
                 guarded(update, unless_a_subagent_waits())
             }
             "StopFailure" if agent.is_none() => {
-                let mut update = set(State::ERROR);
+                let mut update = set(State::READY);
+                update.outcome = Field::Set(Outcome::Error);
                 let error = text(payload, "error").unwrap_or("unknown");
                 let detail = text(payload, "error_details")
                     .or_else(|| text(payload, "last_assistant_message"));
@@ -344,8 +342,17 @@ mod tests {
             json!({ "background_tasks": [], "last_assistant_message": "ok" }),
         ));
         let record = replay(&approved);
-        assert_eq!(state(&record), "done");
+        assert_eq!(state(&record), "ready");
+        assert_eq!(record.outcome, Some(Outcome::Finished));
+        assert_eq!(record.background, 0);
         assert_eq!(record.message.as_deref(), Some("ok"));
+        assert_eq!(record.since, Some(5));
+
+        // The next prompt starts over.
+        approved.push(with(event("UserPromptSubmit"), json!({ "prompt": "more" })));
+        let record = replay(&approved);
+        assert_eq!(state(&record), "working");
+        assert_eq!(record.outcome, None);
     }
 
     #[test]
@@ -389,15 +396,26 @@ mod tests {
     }
 
     #[test]
-    fn background_tasks_keep_the_turn_working() {
-        let record = replay(&[
+    fn background_tasks_are_counted_when_the_turn_ends() {
+        let ended = [
             event("UserPromptSubmit"),
             with(
                 event("Stop"),
-                json!({ "background_tasks": [{ "id": "a", "type": "subagent" }] }),
+                json!({ "background_tasks": [{ "id": "a", "type": "subagent" }, { "id": "b" }] }),
             ),
-        ]);
-        assert_eq!(state(&record), "working.background");
+        ];
+        let record = replay(&ended);
+        assert_eq!(state(&record), "ready");
+        assert_eq!(record.outcome, Some(Outcome::Finished));
+        assert_eq!(record.background, 2);
+        // A new session has none.
+        let mut restarted = ended.to_vec();
+        restarted.push(with(event("SessionStart"), json!({ "source": "clear" })));
+        let record = replay(&restarted);
+        assert_eq!(
+            (state(&record), record.outcome, record.background),
+            ("ready", None, 0)
+        );
     }
 
     #[test]
@@ -438,7 +456,9 @@ mod tests {
         answered.push(sub("SubagentStop"));
         answered.push(event("UserPromptSubmit"));
         answered.push(with(event("Stop"), json!({ "background_tasks": [] })));
-        assert_eq!(state(&replay(&answered)), "done");
+        let record = replay(&answered);
+        assert_eq!(state(&record), "ready");
+        assert_eq!(record.outcome, Some(Outcome::Finished));
     }
 
     #[test]
@@ -499,24 +519,30 @@ mod tests {
     }
 
     #[test]
-    fn idle_prompt_ends_waits_but_not_done_or_background_work() {
+    fn idle_prompt_ends_only_a_turn_in_progress() {
         let idle = with(
             event("Notification"),
             json!({ "notification_type": "idle_prompt" }),
         );
         let waited = replay(&[with(event("PermissionRequest"), bash()), idle.clone()]);
-        assert_eq!(state(&waited), "idle");
+        assert_eq!(state(&waited), "ready");
+        assert_eq!(waited.outcome, None);
         assert_eq!(waited.message, None);
-        let finished = replay(&[with(event("Stop"), json!({})), idle.clone()]);
-        assert_eq!(state(&finished), "done");
-        let background = replay(&[
+        let worked = replay(&[event("UserPromptSubmit"), idle.clone()]);
+        assert_eq!((state(&worked), worked.outcome), ("ready", None));
+        // A finished turn keeps its outcome, background tasks and all.
+        let finished = replay(&[
             with(
                 event("Stop"),
-                json!({ "background_tasks": [{ "id": "a", "type": "subagent" }] }),
+                json!({ "background_tasks": [{ "id": "a" }], "last_assistant_message": "ok" }),
             ),
             idle,
         ]);
-        assert_eq!(state(&background), "working.background");
+        assert_eq!(state(&finished), "ready");
+        assert_eq!(finished.outcome, Some(Outcome::Finished));
+        assert_eq!(finished.background, 1);
+        assert_eq!(finished.message.as_deref(), Some("ok"));
+        assert_eq!(finished.since, Some(0));
     }
 
     #[test]
@@ -525,7 +551,8 @@ mod tests {
             event("StopFailure"),
             json!({ "error": "rate_limit", "error_details": "429 Too Many Requests" }),
         )]);
-        assert_eq!(state(&record), "error");
+        assert_eq!(state(&record), "ready");
+        assert_eq!(record.outcome, Some(Outcome::Error));
         assert_eq!(
             record.message.as_deref(),
             Some("rate_limit: 429 Too Many Requests")
@@ -557,7 +584,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .apply_to(&mut record, 5);
-        assert_eq!(state(&record), "idle");
+        assert_eq!(state(&record), "ready");
         let current = json!({ "hook_event_name": "SessionEnd", "session_id": SESSION });
         Claude
             .interpret(&current)
@@ -590,7 +617,10 @@ mod tests {
         // `/compact`, and compaction while the session idles.
         let mut between_turns = vec![event("UserPromptSubmit"), event("Stop")];
         between_turns.extend(compaction("manual"));
-        assert_eq!(state(&replay(&between_turns)), "done");
+        let record = replay(&between_turns);
+        assert_eq!(state(&record), "ready");
+        assert_eq!(record.outcome, Some(Outcome::Finished));
+        assert_eq!(record.since, Some(1));
     }
 
     #[test]

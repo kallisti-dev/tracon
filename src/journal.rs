@@ -115,10 +115,10 @@ mod tests {
             .write(&Locator::tmux("%1"), Some(&record("working")))
             .unwrap();
         journal
-            .write(&Locator::tmux("%2"), Some(&record("done")))
+            .write(&Locator::tmux("%2"), Some(&record("ready")))
             .unwrap();
         journal
-            .write(&Locator::tmux("%1"), Some(&record("done")))
+            .write(&Locator::tmux("%1"), Some(&record("ready")))
             .unwrap();
         journal.write(&Locator::tmux("%2"), None).unwrap();
         journal
@@ -129,7 +129,7 @@ mod tests {
 
         let records = Journal::replay(&path).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[&Locator::tmux("%1")], record("done"));
+        assert_eq!(records[&Locator::tmux("%1")], record("ready"));
 
         let rewritten = Journal::rewrite(&path, &records).unwrap();
         drop(rewritten);
