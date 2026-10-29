@@ -103,6 +103,14 @@ pub fn run() -> ExitCode {
     }
     match dispatch(cli.command) {
         Ok(code) => code,
+        // A reader such as `head` that closed the pipe wants nothing more.
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe) =>
+        {
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("tracon: {error:#}");
             ExitCode::FAILURE
