@@ -11,7 +11,10 @@ ones waiting for you first and the longest wait at the top.
 
 - macOS or Linux
 - tmux 3.2 or newer, with `focus-events on`
-- Claude Code 2.1.157 or newer; tested with 2.1.300
+- Claude Code 2.1.157 or newer; tested with 2.1.310. The plugin's hooks
+  module, which reports interrupts, approvals and shell commands, needs the
+  mods API: 2.1.310 loads it, 2.1.295 refuses it, and what a version in
+  between or an older one's settings hooks do with it wasn't checked
 - Nix with flakes, to build and install it. Other installation methods are
   planned.
 
@@ -107,12 +110,14 @@ reported, and shown with a label:
 
 Background tasks that outlive a turn show on the row, as in "done · 2 in
 background". A finished pane becomes `idle` when you focus it, or at once if
-it finishes while you are looking at it. Claude Code reports neither an
-approved prompt, nor an interrupt, nor a prompt you cancel before it
-replies, so tracon also reads the screen of a waiting or working pane:
-Claude's spinner lists it as `working`, and its interrupt notice, after Esc,
-Ctrl-C or a bare "No", or a finished turn with no prompt after it lists it
-as `interrupted`. See [compatibility](docs/compatibility.md) for details.
+it finishes while you are looking at it. Claude Code's settings hooks report
+neither an approved prompt, nor an interrupt, nor a prompt you cancel before
+it replies, nor a `!` shell command; the plugin's hooks module reports those.
+Where Claude Code has no mods API, tracon reads the screen of a waiting or
+working pane instead: Claude's spinner lists it as `working`, and its
+interrupt notice, after Esc, Ctrl-C or a bare "No", or a finished turn with
+no prompt after it lists it as `interrupted`. See
+[compatibility](docs/compatibility.md) for details.
 
 The same list and actions are available as commands, for scripts and other
 front ends:

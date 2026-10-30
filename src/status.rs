@@ -90,6 +90,7 @@ impl<'de> Deserialize<'de> for Status {
 /// | `waiting.*` | | the same |
 /// | `working` | | `working` |
 /// | `ready`, outcome `error` | | `error` |
+/// | `ready`, outcome `interrupted` | | `idle.interrupted` |
 /// | `ready`, outcome `finished`, not seen since | | `done` |
 /// | `ready` otherwise | | `idle` |
 ///
@@ -109,6 +110,7 @@ pub fn status(record: &Record, sighting: Option<Sighting>) -> Option<Status> {
         _ if working => Status::known(Status::WORKING),
         _ => match record.outcome {
             Some(Outcome::Error) => Status::known(Status::ERROR),
+            Some(Outcome::Interrupted) => Status::known(Status::IDLE_INTERRUPTED),
             Some(Outcome::Finished) if !record.seen() => Status::known(Status::DONE),
             _ => Status::known(Status::IDLE),
         },
@@ -261,6 +263,10 @@ mod tests {
         assert_eq!(of(&record("waiting.question", None)), "waiting.question");
         assert_eq!(of(&record("ready", None)), "idle");
         assert_eq!(of(&record("ready", Some(Outcome::Error))), "error");
+        assert_eq!(
+            of(&record("ready", Some(Outcome::Interrupted))),
+            "idle.interrupted"
+        );
         let finished = record("ready", Some(Outcome::Finished));
         assert_eq!(of(&finished), "done");
         let seen = Record {

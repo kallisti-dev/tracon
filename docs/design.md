@@ -20,8 +20,10 @@ tracon has two halves, installed separately. The tmux plugin's entry point,
 `tracon.tmux`, runs `tracon setup` from its `bin/` directory. The Claude Code
 plugin is a directory with `.claude-plugin/plugin.json` and
 `hooks/hooks.json`, whose hooks run `"${CLAUDE_PLUGIN_ROOT}"/bin/tracon hook
-claude`. In the Nix packages, each half's `bin/tracon` links to the same
-binary. Nothing is written into Claude Code's settings.
+claude`, and whose `modules` entry loads `hooks/register.ts`, a hooks module
+on Claude Code's mods API that runs the same command for the events the
+settings hooks can't see. In the Nix packages, each half's `bin/tracon`
+links to the same binary. Nothing is written into Claude Code's settings.
 
 ## State, status and label
 
@@ -31,8 +33,9 @@ drawn can change independently.
 
 **State** is what the hooks record, per pane (`src/state.rs`): the agent's
 activity, `working`, `waiting.permission`, `waiting.question` or `ready`;
-the `outcome` of the last turn, `finished` or `error`, until the next prompt
-clears it; the number of `background` tasks running when the turn ended;
+the `outcome` of the last turn, `finished`, `error` or `interrupted`, until
+the next prompt clears it; the number of `background` tasks running when
+the turn ended;
 `since`, when the state or outcome last changed; `viewed`, when a client
 last focused the pane; and the message, harness, session, agent and pin.
 Nothing derived is stored, so focusing a pane only records `viewed`.
@@ -64,6 +67,7 @@ The first rule that applies gives the status:
 | `waiting.*` | | the same |
 | `working` | | `working` |
 | `ready`, outcome `error` | | `error` |
+| `ready`, outcome `interrupted` | | `idle.interrupted` |
 | `ready`, outcome `finished`, not seen | | `done` |
 | `ready` otherwise | | `idle` |
 
@@ -101,7 +105,9 @@ it at each step.
 
 ## Claude Code adapter
 
-`src/harness/claude.rs` maps events to states:
+`src/harness/claude.rs` maps the events of both channels to changes. The
+settings hooks in `hooks/hooks.json`, whose payloads carry
+`hook_event_name`:
 
 | Event | Change | Condition |
 | --- | --- | --- |
@@ -142,14 +148,48 @@ after the turn's `Stop`, and no `Stop` follows. Its events, `PreCompact`, the
 compacting subagent's `SubagentStop`, `SessionStart` with source `compact` and
 `PostCompact`, say nothing about the turn.
 
+### The hooks module
+
+The settings hooks fire for none of an interrupt, a refused or cancelled
+prompt, an approval, or a `!` shell command. Claude Code's mods API sees
+them all, so `hooks/register.ts` forwards what it needs through the same
+`tracon hook claude` command, as JSON with the mod event's name under
+`event` and the few fields the adapter reads. The module keeps the session
+id the settings hooks last named, the prompt box's draft as the person
+edits it, and the tool rows already reported as running; it forwards
+main-agent turn events only, the engine's rows that matter, and one report
+per tool row that starts running. A report that fails never reaches
+Claude. The adapter then applies:
+
+| Mod event, as forwarded | Change | Condition |
+| --- | --- | --- |
+| `prompt.submit` typed: origin `composer`, `bridge`, `sdk` or `unclassified`, not meta | `working`, no outcome, the prompt as message | always |
+| `prompt.submit` delivered: a task notification, another agent's message, a scheduled prompt | `working`, no outcome, the gist as message | no subagent waits |
+| `turn.start` | `working`, no outcome | no subagent waits |
+| `turn.complete`, reason `aborted` | `ready`, outcome `interrupted` | no subagent waits |
+| `turn.complete`, reason `error` | `ready`, outcome `error` | no subagent waits |
+| `turn.complete` otherwise | `ready`, outcome `finished` | no subagent waits, and the outcome isn't already `interrupted` |
+| `session.append` of the engine's note `[Request interrupted by user…]` | `ready`, outcome `interrupted`; in a subagent's conversation, `working` | no subagent waits; that subagent's wait |
+| `session.append` of a shell command's `<bash-stdout>` row | `ready`, outcome `finished` | `working` |
+| `prompt.change` clearing a draft that starts with `!` | `working`, with the line as message | always |
+| `ui.render` of a tool row that started running | `working` | no subagent waits |
+
+Both channels run, so a change both report is applied once: the second
+report finds the record already there and changes nothing. A refused prompt
+ends its turn as answered, after the note; the note sets the outcome, and
+the turn's end leaves it. The settings hooks stay the baseline for a Claude
+Code without the mods API, with the screen reading below for what they
+miss.
+
 ## Screen reading
 
-Some changes fire no hook: Claude Code reports neither an approved prompt,
-nor an interrupt, nor a prompt cancelled before Claude replied, so the record
-stays `waiting` while an approved tool runs, and `waiting` or `working` after
-Esc, Ctrl-C or a bare "No". The list reads
-the plain-text screen of each pane in one of those states, and its harness
-says what it recognises there (`Harness::read_screen`):
+Without the hooks module, some changes fire no hook: Claude Code's settings
+hooks report neither an approved prompt, nor an interrupt, nor a prompt
+cancelled before Claude replied, so the record stays `waiting` while an
+approved tool runs, and `waiting` or `working` after Esc, Ctrl-C or a bare
+"No". The list reads the plain-text screen of each pane in one of those
+states, and its harness says what it recognises there
+(`Harness::read_screen`):
 
 | Sighting | Claude Code shows |
 | --- | --- |
@@ -230,7 +270,7 @@ options back:
 | Option | Meaning |
 | --- | --- |
 | `@tracon_state` | The state: `working`, `waiting.permission`, `waiting.question` or `ready` |
-| `@tracon_outcome` | How the last turn ended, `finished` or `error`, until the next prompt |
+| `@tracon_outcome` | How the last turn ended, `finished`, `error` or `interrupted`, until the next prompt |
 | `@tracon_background` | The number of background tasks still running, unset when none |
 | `@tracon_since` | Epoch seconds when the state or outcome last changed |
 | `@tracon_message` | One line about the state, such as the command awaiting permission |
@@ -321,7 +361,7 @@ without starting a daemon.
 | `src/list.rs` | The ordered list front ends show |
 | `src/cli.rs`, `src/ui.rs`, `src/check.rs` | The command line, the picker and the check |
 | `tracon.tmux` | The tmux plugin's entry point |
-| `.claude-plugin/plugin.json`, `hooks/hooks.json` | The Claude Code plugin |
+| `.claude-plugin/plugin.json`, `hooks/hooks.json`, `hooks/register.ts` | The Claude Code plugin: its settings hooks and its hooks module |
 | `skills/check/SKILL.md` | `/tracon:check`, which has Claude run the check and explain it |
 
 A pane locator is a backend id and an id only that backend interprets, such

@@ -1112,6 +1112,44 @@ fn popup_reports_an_empty_list_and_needs_a_client() {
     server.tracon("%0", &["popup", &client]);
 }
 
+/// The hooks module forwards mod events through the same command, under
+/// `event`, for what the settings hooks miss.
+#[test]
+fn mod_events_report_what_the_hooks_miss() {
+    let server = Server::start();
+    server.hook("%0", event("PermissionRequest", bash(None)));
+    assert_eq!(server.status("%0"), "waiting.permission");
+    // The tool's row started running: approved.
+    server.hook(
+        "%0",
+        json!({ "event": "ui.render", "running": true, "tool": "Bash" }),
+    );
+    assert_eq!(server.status("%0"), "working");
+    // Ctrl-C while it ran: the note, then the turn's end.
+    server.hook(
+        "%0",
+        json!({ "event": "session.append", "door": "note", "text": "[Request interrupted by user for tool use]" }),
+    );
+    server.hook(
+        "%0",
+        json!({ "event": "turn.complete", "reason": "aborted" }),
+    );
+    let entry = server.entry("%0").unwrap();
+    assert_eq!(entry["status"], "idle.interrupted");
+    assert_eq!(entry["outcome"], "interrupted");
+    assert_eq!(entry["label"], "interrupted");
+    assert_eq!(entry["message"], "Bash: ls -la > x");
+    server.option_becomes("%0", "@tracon_outcome", "interrupted");
+    // A shell command, which no prompt event reports.
+    server.hook(
+        "%0",
+        json!({ "event": "prompt.change", "origin": "clear", "before": "! make check" }),
+    );
+    let entry = server.entry("%0").unwrap();
+    assert_eq!(entry["status"], "working");
+    assert_eq!(entry["message"], "! make check");
+}
+
 /// A daemon left by an earlier installation runs old code until setup finds
 /// it running from another binary and replaces it, keeping the records.
 #[test]

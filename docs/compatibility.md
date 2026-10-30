@@ -64,24 +64,46 @@ text went back into the input box, with no interrupt notice, so the last
 turn shown was the one before, ending in its `✻ Baked for 4s · done 5:55 PM`
 line.
 
+## What the hooks module sees
+
+Observed with Claude Code 2.1.310 on 2026-10-28, logging every event a
+hooks module receives from a real session, beside the settings hooks:
+
+| Action | Mod events |
+| --- | --- |
+| A `!` shell command | `prompt.change` with origin `clear` as the box empties, then nothing until the command ends: `session.append` rows through the `command` door with the `<bash-input>` and the `<bash-stdout>`, together, then `turn.start` with the output and a model turn on it, ending in `Stop` and `turn.complete`. A `ToolProgress` render with the background hint comes three seconds in |
+| A permission prompt appears | `tool.call`, `tool.check` answering `ask`, `classic.PermissionRequest` |
+| Approve | the `ToolGroup` (or `ToolUse`) render's call turns `isRunning`; nothing else until `PostToolUse` |
+| Esc at the dialog | `tool.call` resolves with the rejection, a `session.append` note `[Request interrupted by user for tool use]`, then `turn.complete` with reason `answer` and no `Stop` |
+| Esc during a turn | the note `[Request interrupted by user]`, then `turn.complete` with reason `aborted` |
+| Ctrl-C before a reply | `prompt.submit`, `turn.start`, the note, `turn.complete` `aborted`, and `prompt.change` with origin `engine` putting the text back |
+| Ctrl-C during an approved command | the tool's result `Exit code 137`, the note for tool use, `turn.complete` `aborted` |
+| A background agent finishes | its `SubagentHandback` delivers an `<agent-message>` as a prompt (`prompt.submit` with origin `peer` and `isMeta`, and a `UserPromptSubmit` with that text), a turn on it, then the `<task-notification>` prompt row |
+| Ctrl-U on a draft | a `prompt.edit`, not a `clear` |
+
+Whether clearing a draft with Esc raises a `clear` wasn't checked: the test
+session had vim mode on, where Esc leaves insert mode. The `clear` origin
+also covers a stashed draft.
+
 ## Blind spots
 
-- **Interrupts and bare refusals.** Esc, Ctrl-C and "No" without a comment
-  fire no hook, and `Stop` doesn't run after an interrupt, so the record
-  stays `waiting` or `working`. tracon lists the pane as `interrupted` while
-  Claude Code's interrupt notice is on screen; see
+- **Without the hooks module.** Esc, Ctrl-C and "No" without a comment fire
+  no settings hook, `Stop` doesn't run after an interrupt, a prompt cancelled
+  before Claude replies fires `UserPromptSubmit` alone, and nothing fires
+  when a prompt is approved. The hooks module reports each of these; on a
+  Claude Code without the mods API the record stays `waiting` or `working`,
+  and tracon reads the screen instead: the interrupt notice or a finished
+  turn with no prompt after it lists the pane as `interrupted`, and the
+  spinner line with no dialog as `working`; see
   [screen reading](design.md#screen-reading).
-- **Cancelled prompts.** A prompt cancelled before Claude replies fires
-  `UserPromptSubmit` and nothing after it, so the record stays `working`.
-  tracon lists the pane as `interrupted` while the last turn on screen has
-  ended.
-- **Approval lag.** Nothing fires when a prompt is approved, so the record
-  stays `waiting.permission` until the tool finishes. tracon lists such a pane
-  as `working` while its screen shows Claude Code's spinner line and no dialog.
 - **Screen text.** The corrections match text Claude Code draws, checked
   with 2.1.300 and, for cancelled prompts, 2.1.309. If a later version draws
   it differently, the pane shows its recorded state, as above, until the next
   hook; the preview shows the truth.
+- **A `!` line not run.** The module reads a cleared draft that starts with
+  `!` as a shell command, since a submit empties the box the same way a
+  clear or a stash does. A `!` line cleared or stashed instead lists the
+  pane as `working` until its next event.
 - **Sessions started before the plugin loaded** have no hooks and are listed
   as `unknown` until restarted.
 - **A crashed agent** that never ran SessionEnd leaves its last state on the
@@ -93,12 +115,15 @@ line.
 
 The tests run the binary and both plugins against real tmux servers, each
 with a daemon of its own, as assembled from the source and as packaged by
-Nix, with hook payloads in place of an agent. Clients attach in control mode, which needs no terminal;
-popups are only checked to open without error. One test runs the real Claude
-Code binary without network access and checks that a session started in a new
-pane reports through the plugin installed as Home Manager installs it, and
-clears its state when it ends. The tests don't cover a real conversation,
-permission prompt or subagent; those were checked by hand as described
-above.
+Nix, with hook payloads and forwarded mod events in place of an agent.
+Clients attach in control mode, which needs no terminal; popups are only
+checked to open without error. One test runs the real Claude Code binary
+without network access and checks that a session started in a new pane
+reports through the plugin installed as Home Manager installs it, and
+clears its state when it ends; the Nix checks also validate the plugin,
+hooks module included, with `claude plugin validate --strict`. The tests
+don't cover a real conversation, permission prompt or subagent; those were
+checked by hand as described above, the hooks module's reports among them
+on 2026-10-29 against a session of Claude Code 2.1.310.
 
 See [troubleshooting](troubleshooting.md) for diagnosing a setup.

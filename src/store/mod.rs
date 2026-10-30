@@ -76,6 +76,8 @@ pub enum Cond {
     Agent(Option<String>),
     /// The recorded harness session is this one.
     Session(String),
+    /// The last turn ended this way, or hasn't ended for `None`.
+    Outcome(Option<Outcome>),
     Not(Box<Cond>),
     All(Vec<Cond>),
 }
@@ -93,6 +95,7 @@ impl Cond {
                 record.agent.as_deref().unwrap_or("") == agent.as_deref().unwrap_or("")
             }
             Cond::Session(session) => record.session.as_deref() == Some(session.as_str()),
+            Cond::Outcome(outcome) => record.outcome == *outcome,
             Cond::Not(cond) => !cond.eval(record),
             Cond::All(conds) => conds.iter().all(|cond| cond.eval(record)),
         }
@@ -216,6 +219,11 @@ mod tests {
         assert!(Cond::Agent(Some("a1".into())).eval(&record));
         assert!(!Cond::Agent(None).eval(&record));
         assert!(Cond::Agent(None).eval(&Record::default()));
+        assert!(Cond::Outcome(None).eval(&record));
+        record.outcome = Some(Outcome::Interrupted);
+        assert!(Cond::Outcome(Some(Outcome::Interrupted)).eval(&record));
+        assert!(!Cond::Outcome(Some(Outcome::Finished)).eval(&record));
+        record.outcome = None;
 
         Guarded::when(Change::Clear, Cond::Session("s2".into())).apply_to(&mut record, 2);
         assert!(record.state.is_some());

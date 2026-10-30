@@ -129,6 +129,9 @@ impl<'de> Deserialize<'de> for State {
 pub enum Outcome {
     Finished,
     Error,
+    /// The user cut the turn short: an interrupt, a refused prompt, a
+    /// cancelled prompt.
+    Interrupted,
 }
 
 impl Outcome {
@@ -136,6 +139,7 @@ impl Outcome {
         match self {
             Outcome::Finished => "finished",
             Outcome::Error => "error",
+            Outcome::Interrupted => "interrupted",
         }
     }
 }
