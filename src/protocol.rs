@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::backend::Locator;
 use crate::list::Entry;
 use crate::state::Record;
+use crate::summary::Group;
 
 /// Bumped when a message changes shape in a way an older peer can't read.
 pub const PROTOCOL: u32 = 1;
@@ -163,6 +164,15 @@ pub struct List {
 
 pub type ListResult = Vec<Entry>;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Summary {
+    #[serde(default)]
+    pub env: Env,
+}
+
+/// The groups of the list with their sizes, in the list's order.
+pub type SummaryResult = Vec<Group>;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Focus {
     /// A locator, or a bare id resolved against the client's own backend.
@@ -219,6 +229,26 @@ pub struct SettingsResult {
     /// The row format, as `@tracon-format` or the default gives it.
     #[serde(default)]
     pub format: String,
+    /// The summary's format per group, and what joins the groups.
+    #[serde(default)]
+    pub summary_format: String,
+    #[serde(default)]
+    pub summary_separator: String,
+    /// The configuration file, when the daemon knows where to look for it.
+    #[serde(default)]
+    pub config_file: Option<ConfigFile>,
+}
+
+/// The configuration file as the daemon last ran it; also what `reload`
+/// answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigFile {
+    pub path: String,
+    /// Whether the file exists.
+    pub found: bool,
+    /// What stopped it, or the last failure of a function it defines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A record as the event socket carries it.

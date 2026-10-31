@@ -9,7 +9,7 @@ use serde_json::Value;
 use tracon::backend::TmuxBackend;
 use tracon::backend::tmux::setup;
 use tracon::client::{self, Client};
-use tracon::protocol::{self, HelloResult};
+use tracon::protocol::{self, ConfigFile, HelloResult, SettingsResult};
 use tracon::runtime::Runtime;
 use tracon::tmux::Tmux;
 use tracon::{Config, Status};
@@ -112,31 +112,52 @@ pub fn run(runtime: &Runtime, session: Option<&str>) -> Result<ExitCode> {
             "focus-events is off, so tmux doesn't report focus and finished panes stay done",
         );
     }
-    if let Err(error) = Config::from_tmux(tmux) {
-        report.problem(format!("a tracon option is invalid: {error}"));
-    }
-
-    let hello = Client::connect(runtime).and_then(|mut client| client.hello());
-    match hello {
-        Ok(hello) if hello.version != VERSION => report.problem(format!(
-            "the daemon runs tracon {}, but this is {VERSION}; reload the tmux configuration, which replaces it",
-            hello.version
-        )),
-        Ok(hello)
-            if !installed.binary.is_empty()
-                && client::from_another_binary(&hello, Path::new(&installed.binary)) =>
-        {
-            report.problem(format!(
-                "the daemon runs {}, not the tracon tmux is set up with; reload the tmux configuration, which replaces it",
-                binary_of(&hello)
-            ));
+    let options_valid = match Config::from_tmux(tmux) {
+        Ok(_) => true,
+        Err(error) => {
+            report.problem(format!("a tracon option is invalid: {error}"));
+            false
         }
-        Ok(hello) => report.ok(format!(
-            "the daemon runs tracon {} from {}",
-            hello.version,
-            binary_of(&hello)
-        )),
+    };
+
+    match Client::connect(runtime) {
         Err(error) => report.problem(format!("the daemon did not answer: {error}")),
+        Ok(mut client) => {
+            match client.hello() {
+                Ok(hello) if hello.version != VERSION => report.problem(format!(
+                    "the daemon runs tracon {}, but this is {VERSION}; reload the tmux configuration, which replaces it",
+                    hello.version
+                )),
+                Ok(hello)
+                    if !installed.binary.is_empty()
+                        && client::from_another_binary(&hello, Path::new(&installed.binary)) =>
+                {
+                    report.problem(format!(
+                        "the daemon runs {}, not the tracon tmux is set up with; reload the tmux configuration, which replaces it",
+                        binary_of(&hello)
+                    ));
+                }
+                Ok(hello) => report.ok(format!(
+                    "the daemon runs tracon {} from {}",
+                    hello.version,
+                    binary_of(&hello)
+                )),
+                Err(error) => report.problem(format!("the daemon did not answer: {error}")),
+            }
+            // The settings read the options too, so a bad one is reported
+            // once, above.
+            if options_valid {
+                let params = protocol::Settings {
+                    env: protocol::env(),
+                };
+                match client.call::<SettingsResult>("settings", params) {
+                    Ok(settings) => check_config_file(&mut report, settings.config_file),
+                    Err(error) => {
+                        report.problem(format!("the daemon did not answer: {error}"));
+                    }
+                }
+            }
+        }
     }
 
     check_claude(&mut report);
@@ -185,6 +206,19 @@ pub fn run(runtime: &Runtime, session: Option<&str>) -> Result<ExitCode> {
             report.problems
         );
         Ok(ExitCode::FAILURE)
+    }
+}
+
+fn check_config_file(report: &mut Report, file: Option<ConfigFile>) {
+    match file {
+        None => {}
+        Some(file) if !file.found => {
+            report.info(format!("no configuration file at {}", file.path));
+        }
+        Some(ConfigFile {
+            error: Some(error), ..
+        }) => report.problem(format!("the configuration file has an error: {error}")),
+        Some(file) => report.ok(format!("the configuration file {} loaded", file.path)),
     }
 }
 

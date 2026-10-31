@@ -17,9 +17,11 @@ pub mod list;
 pub mod protocol;
 pub mod runtime;
 pub mod screen;
+pub mod script;
 pub mod state;
 pub mod status;
 pub mod store;
+pub mod summary;
 pub mod tmux;
 
 use std::time::{SystemTime, UNIX_EPOCH};

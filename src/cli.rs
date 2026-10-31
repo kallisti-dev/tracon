@@ -9,12 +9,13 @@ use tracon::backend::TmuxBackend;
 use tracon::backend::tmux::mirror;
 use tracon::backend::tmux::setup;
 use tracon::client::Client;
-use tracon::format;
+use tracon::format::{self, Template};
 use tracon::list::Entry;
-use tracon::protocol::{self, NextResult, SettingsResult};
+use tracon::protocol::{self, ConfigFile, NextResult, SettingsResult};
 use tracon::runtime::Runtime;
+use tracon::summary::{self, Group};
 use tracon::tmux::{self as tmux_util, Tmux};
-use tracon::{Locator, daemon};
+use tracon::{Config, Locator, daemon};
 
 use crate::{check, ui};
 
@@ -37,6 +38,15 @@ enum Command {
     },
     /// List agent panes, highest priority and longest wait first.
     List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Count the agent panes in each group of the list, as a tmux format
+    /// with styles for a status line.
+    Summary {
+        /// Without the styles.
+        #[arg(long)]
+        plain: bool,
         #[arg(long)]
         json: bool,
     },
@@ -90,6 +100,8 @@ enum Command {
     /// Mirror this tmux server's records into its panes' options until the
     /// server exits. Setup starts it.
     Mirror,
+    /// Run the configuration file again, and say how it went.
+    Reload,
 }
 
 pub fn run() -> ExitCode {
@@ -138,6 +150,27 @@ fn dispatch(command: Command) -> Result<ExitCode> {
                 for entry in &entries {
                     writeln!(out, "{}", format::plain(&entry.row(&format, now)))?;
                 }
+            }
+        }
+        Command::Summary { plain, json } => {
+            let env = protocol::env();
+            let mut client = Client::connect(&runtime)?;
+            let settings: SettingsResult =
+                client.call("settings", protocol::Settings { env: env.clone() })?;
+            let groups: Vec<Group> = client.call("summary", protocol::Summary { env })?;
+            let mut out = std::io::stdout().lock();
+            if json {
+                serde_json::to_writer_pretty(&mut out, &groups)?;
+                writeln!(out)?;
+            } else {
+                let format = summary_format(&settings);
+                let spans = summary::render(&groups, &format, &settings.summary_separator);
+                let text = if plain {
+                    format::plain(&spans)
+                } else {
+                    tmux_util::markup(&spans)
+                };
+                writeln!(out, "{text}")?;
             }
         }
         Command::Focus { pane, client } => {
@@ -218,6 +251,17 @@ fn dispatch(command: Command) -> Result<ExitCode> {
                 .build()?
                 .block_on(mirror::run(&runtime, &server))?;
         }
+        Command::Reload => {
+            let file: Option<ConfigFile> = Client::connect(&runtime)?.call("reload", ())?;
+            match file {
+                None => println!("no home directory, so no configuration file"),
+                Some(file) if !file.found => println!("no configuration file at {}", file.path),
+                Some(ConfigFile {
+                    error: Some(error), ..
+                }) => bail!("{error}"),
+                Some(file) => println!("loaded {}", file.path),
+            }
+        }
         Command::Daemon { stop: true } => match Client::connect_running(&runtime) {
             Ok(client) => client.stop()?,
             Err(tracon::Error::Daemon { .. }) => {}
@@ -225,6 +269,15 @@ fn dispatch(command: Command) -> Result<ExitCode> {
         },
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The summary format the daemon's settings give, which it has checked; the
+/// default stands in for one from a newer daemon this build can't read.
+fn summary_format(settings: &SettingsResult) -> Template {
+    match settings.summary_format.as_str() {
+        "" => Config::default().summary.format,
+        source => Template::parse(source).unwrap_or_else(|_| Config::default().summary.format),
+    }
 }
 
 /// The listed panes, ordered by the configured rules.

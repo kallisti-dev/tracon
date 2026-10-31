@@ -1,5 +1,6 @@
 //! The core as a long-lived process: the records, the backends that find and
-//! act on panes, the journal, and the two sockets clients use.
+//! act on panes, the journal, the configuration file, and the two sockets
+//! clients use.
 //!
 //! One lock covers the records and the backends, and every request runs
 //! under it on the blocking pool, since backends run tmux synchronously. A
@@ -27,8 +28,10 @@ use crate::journal::Journal;
 use crate::list::{self, Entry};
 use crate::protocol::{self, Message, Request, Response, RpcError, Stored};
 use crate::runtime::Runtime;
+use crate::script::Script;
 use crate::state::Record;
 use crate::store::{Change, Field, Guarded, MemoryStore};
+use crate::summary::{self, Group};
 use crate::tmux::{self, Tmux};
 use crate::{Config, Error, Outcome};
 
@@ -140,6 +143,8 @@ struct Inner {
     store: MemoryStore,
     journal: Journal,
     backends: Registry,
+    /// The configuration file, as last run.
+    script: Script,
     /// The number of the last change published.
     seq: u64,
 }
@@ -251,15 +256,22 @@ impl Daemon {
         }
     }
 
+    /// The configuration file's settings, with the tmux options of the
+    /// client's own server over them.
     fn config(inner: &mut Inner, env: &Env) -> Result<Config, RpcError> {
-        match inner.backends.own(env) {
-            Some(backend) => Config::from_tmux(backend.tmux()).map_err(failed),
-            None => Ok(Config::default()),
+        let mut config = inner.script.config();
+        if let Some(backend) = inner.backends.own(env) {
+            config.apply_tmux(backend.tmux()).map_err(failed)?;
         }
+        Ok(config)
     }
 
     fn entries(&self, inner: &mut Inner, env: &Env) -> Result<Vec<Entry>, RpcError> {
         let config = Self::config(inner, env)?;
+        Ok(self.entries_with(inner, &config))
+    }
+
+    fn entries_with(&self, inner: &mut Inner, config: &Config) -> Vec<Entry> {
         let panes = inner.backends.panes();
         self.reconcile(inner, &panes);
         let records: Vec<_> = inner
@@ -269,13 +281,9 @@ impl Daemon {
             .map(|(pane, record)| (pane.clone(), record.clone()))
             .collect();
         let backends = &inner.backends;
-        Ok(list::entries(
-            panes,
-            records,
-            &harness::all(),
-            &config,
-            |pane| backends.text(pane),
-        ))
+        list::entries(panes, records, &harness::all(), config, |pane| {
+            backends.text(pane)
+        })
     }
 
     fn hello(&self, params: protocol::Hello) -> protocol::HelloResult {
@@ -397,7 +405,24 @@ impl Daemon {
         Ok(protocol::SettingsResult {
             preview_interval_ms: config.preview_interval.as_millis() as u64,
             format: config.format.source().to_owned(),
+            summary_format: config.summary.format.source().to_owned(),
+            summary_separator: config.summary.separator,
+            config_file: inner.script.report(),
         })
+    }
+
+    fn summary(&self, params: protocol::Summary) -> Result<Vec<Group>, RpcError> {
+        let mut inner = lock(&self.inner);
+        let config = Self::config(&mut inner, &params.env)?;
+        let entries = self.entries_with(&mut inner, &config);
+        Ok(summary::groups(&entries, &config))
+    }
+
+    /// Run the configuration file again.
+    fn reload(&self) -> Option<protocol::ConfigFile> {
+        let mut inner = lock(&self.inner);
+        inner.script = Script::load(Script::path());
+        inner.script.report()
     }
 
     /// Answer one request. `stop` is handed to the main loop, which answers
@@ -417,6 +442,8 @@ impl Daemon {
             "seen" => json(self.seen(request.params()?)?),
             "capture" => json(self.capture(request.params()?)?),
             "settings" => json(self.settings(request.params()?)?),
+            "summary" => json(self.summary(request.params()?)?),
+            "reload" => json(self.reload()),
             "stop" => json(()),
             other => Err(RpcError::new(
                 RpcError::METHOD_NOT_FOUND,
@@ -562,6 +589,7 @@ async fn serve(runtime: &Runtime) -> Result<(), Error> {
             store: MemoryStore::new(records),
             journal: Journal::open(&runtime.journal())?,
             backends,
+            script: Script::load(Script::path()),
             seq: 0,
         }),
         events,

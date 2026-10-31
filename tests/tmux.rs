@@ -176,6 +176,7 @@ impl Server {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("TRACON_CLIENT")
+            .env_remove("XDG_CONFIG_HOME")
             .env(DIR_VAR, &self.runtime)
             .env("HOME", self.home())
             .env("TERM", "xterm-256color")
@@ -711,6 +712,119 @@ fn labels_icons_and_the_format_are_options() {
         String::from_utf8_lossy(&output.stderr)
             .contains("invalid @tracon-format: unknown variable {colour}"),
         "{output:?}"
+    );
+}
+
+#[test]
+fn the_summary_counts_the_groups_of_the_list() {
+    let server = Server::start();
+    let panes: Vec<String> = (0..3).map(|_| server.new_window("work")).collect();
+    server.seed(&panes[0], json!({ "state": "waiting.permission" }), 10);
+    server.seed(&panes[1], json!({ "state": "waiting.question" }), 20);
+    server.seed(
+        &panes[2],
+        json!({ "state": "ready", "outcome": "finished" }),
+        30,
+    );
+    assert_eq!(
+        server.tracon("%0", &["summary"]),
+        "#[default,fg=yellow,bold]? 2#[default] · #[default,fg=green]✓ 1#[default]\n"
+    );
+    assert_eq!(server.tracon("%0", &["summary", "--plain"]), "? 2 · ✓ 1\n");
+    let groups: Vec<Value> =
+        serde_json::from_str(&server.tracon("%0", &["summary", "--json"])).unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["status"], "waiting");
+    assert_eq!(groups[0]["count"], 2);
+    assert_eq!(groups[0]["label"], "needs you");
+    assert_eq!(groups[1]["status"], "done");
+    // The groups are the order's, and the format and separator are options.
+    server.tmux(&[
+        "set-option",
+        "-g",
+        "@tracon-order",
+        "done waiting.permission waiting",
+    ]);
+    server.tmux(&[
+        "set-option",
+        "-g",
+        "@tracon-summary-format",
+        "{count} {label}",
+    ]);
+    server.tmux(&["set-option", "-g", "@tracon-summary-separator", ", "]);
+    assert_eq!(
+        server.tracon("%0", &["summary", "--plain"]),
+        "1 done, 1 needs approval, 1 needs you\n"
+    );
+}
+
+/// The configuration file runs in the daemon: its functions derive what the
+/// list shows, and the tmux options come over its settings.
+#[test]
+fn the_configuration_file_sets_up_settings_and_functions() {
+    let server = Server::start();
+    let dir = server.home().join(".config/tracon");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("init.lua");
+    fs::write(
+        &file,
+        r#"
+local tracon = require("tracon")
+tracon.setup({
+  format = "{icon} {label} {location}",
+  labels = { ["working.shell"] = "in a shell" },
+  icons = function(status)
+    if status == "working.shell" then return "$" end
+  end,
+  status = function(pane)
+    if pane.state == "working" and (pane.message or ""):sub(1, 1) == "!" then
+      return "working.shell"
+    end
+    return tracon.status(pane)
+  end,
+  summary = { format = "{count} {label}", separator = ", " },
+})
+"#,
+    )
+    .unwrap();
+    server.hook(
+        "%0",
+        event("UserPromptSubmit", json!({ "prompt": "! make check" })),
+    );
+    assert_eq!(server.tracon("%0", &["list"]), "$ in a shell work:0.0\n");
+    let entry = server.entry("%0").unwrap();
+    assert_eq!(entry["status"], "working.shell");
+    assert_eq!(entry["style"], "blue");
+    assert_eq!(server.tracon("%0", &["summary", "--plain"]), "1 working\n");
+    server.tmux(&["set-option", "-g", "@tracon-format", "{status}"]);
+    assert_eq!(server.tracon("%0", &["list"]), "working.shell\n");
+    let output = server.tracon_output("%0", &["check"], None);
+    let report = String::from_utf8_lossy(&output.stdout);
+    let loaded = format!("ok       the configuration file {} loaded", file.display());
+    assert!(report.contains(&loaded), "{report}");
+
+    // A broken file leaves the defaults, and the reload says what is wrong.
+    fs::write(&file, "require('tracon').setup({ colour = 'red' })\n").unwrap();
+    let output = server.tracon_output("%0", &["reload"], None);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("init.lua:1: setup has no key colour"),
+        "{stderr}"
+    );
+    assert_eq!(server.entry("%0").unwrap()["status"], "working");
+    let output = server.tracon_output("%0", &["check"], None);
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        report.contains("problem  the configuration file has an error: ")
+            && report.contains("init.lua:1: setup has no key colour"),
+        "{report}"
+    );
+
+    fs::remove_file(&file).unwrap();
+    assert_eq!(
+        server.tracon("%0", &["reload"]),
+        format!("no configuration file at {}\n", file.display())
     );
 }
 

@@ -9,10 +9,9 @@ use crate::backend::{Locator, PaneInfo};
 use crate::config::Config;
 use crate::format::{Span, Template};
 use crate::harness::Harness;
-use crate::label::Table;
 use crate::screen::{self, Sighting};
 use crate::state::{Outcome, Record, State};
-use crate::status::{self, Standing, Status, sort_by_priority};
+use crate::status::{Standing, Status, sort_by_priority};
 
 /// The variables a row format may use; [`Entry::value`] gives each one.
 pub const VARIABLES: [&str; 13] = [
@@ -139,11 +138,11 @@ pub fn entries(
         .into_iter()
         .filter_map(|info| {
             let mut record = records.remove(&info.pane).unwrap_or_default();
-            let mut status = None;
+            // A harness no hook has reported is noted, so that the status
+            // function can call the pane `unknown`.
             if record.state.is_none()
                 && let Some(harness) = harnesses.iter().find(|h| h.runs_as(&info.command))
             {
-                status = Some(Status::known(Status::UNKNOWN));
                 record.harness = Some(harness.name().to_owned());
             }
             let sighting = record
@@ -153,25 +152,17 @@ pub fn entries(
                 .and(record.harness.as_deref())
                 .and_then(|name| harnesses.iter().find(|h| h.name() == name))
                 .and_then(|harness| text(&info.pane).and_then(|text| harness.read_screen(&text)));
-            let status = status.or_else(|| status::status(&record, sighting));
+            let status = config.status(&record, sighting);
             if status.is_none() && !record.pinned {
                 return None;
             }
-            let shown = |table: &Table| {
-                status
-                    .as_ref()
-                    .and_then(|status| table.get(status))
-                    .unwrap_or_default()
-                    .to_owned()
-            };
-            // A status without a label is shown by its name.
-            let label = match &status {
-                Some(status) => config
-                    .labels
-                    .get(status)
-                    .unwrap_or(status.as_str())
-                    .to_owned(),
-                None => String::new(),
+            let (label, icon, style) = match &status {
+                Some(status) => (
+                    config.label(status),
+                    config.icon(status),
+                    config.style(status),
+                ),
+                None => Default::default(),
             };
             Some(Entry {
                 pane: info.pane,
@@ -189,8 +180,8 @@ pub fn entries(
                 pinned: record.pinned,
                 viewed: record.viewed,
                 sighting,
-                icon: shown(&config.icons),
-                style: shown(&config.styles),
+                icon,
+                style,
                 label,
                 status,
             })

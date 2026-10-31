@@ -68,6 +68,14 @@ Reload the tmux configuration to start it again; its complaints go to the
 tmux server's log, or to the terminal when you run `tracon mirror` by hand
 inside tmux. The list and the picker don't depend on it.
 
+## The configuration file has an error
+
+`~/.config/tracon/init.lua` stopped at the line shown, or one of the
+functions it defines failed on the pane it was asked about. tracon runs on
+its defaults, or on the built-in function, until the file is fixed; after
+editing it, run `tracon reload`, which runs it again and reports the
+result.
+
 ## Claude Code doesn't load the tracon plugin
 
 Install the `claude-plugin` package where Claude Code loads plugins: with Home

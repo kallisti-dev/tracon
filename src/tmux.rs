@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::Error;
+use crate::format::{Colour, Span, Style};
 
 /// The tmux binary, baked in by the Nix packages and found on `PATH`
 /// otherwise.
@@ -124,6 +125,65 @@ pub fn escape_format(value: &str) -> String {
     value.replace('#', "##")
 }
 
+/// `spans` as a tmux format for a status line: each styled run as
+/// `#[default,fg=yellow,bold]text#[default]`, with `#` in the text doubled.
+pub fn markup(spans: &[Span]) -> String {
+    let mut out = String::new();
+    let mut styled = false;
+    for span in spans.iter().filter(|span| !span.text.is_empty()) {
+        let words = style_words(&span.style);
+        if words.is_empty() {
+            if styled {
+                out.push_str("#[default]");
+                styled = false;
+            }
+        } else {
+            out.push_str(&format!("#[default,{}]", words.join(",")));
+            styled = true;
+        }
+        out.push_str(&escape_format(&span.text));
+    }
+    if styled {
+        out.push_str("#[default]");
+    }
+    out
+}
+
+/// A style as tmux's words, none for the default style.
+fn style_words(style: &Style) -> Vec<String> {
+    let mut words = Vec::new();
+    if let Some(colour) = style.fg {
+        words.push(format!("fg={}", colour_name(colour)));
+    }
+    if let Some(colour) = style.bg {
+        words.push(format!("bg={}", colour_name(colour)));
+    }
+    for (set, word) in [
+        (style.bold, "bold"),
+        (style.dim, "dim"),
+        (style.italic, "italics"),
+        (style.underline, "underscore"),
+        (style.reversed, "reverse"),
+    ] {
+        if set {
+            words.push(word.to_owned());
+        }
+    }
+    words
+}
+
+fn colour_name(colour: Colour) -> String {
+    const NAMES: [&str; 8] = [
+        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    ];
+    match colour {
+        Colour::Indexed(index) if index < 8 => NAMES[index as usize].to_owned(),
+        Colour::Indexed(index) if index < 16 => format!("bright{}", NAMES[index as usize - 8]),
+        Colour::Indexed(index) => format!("colour{index}"),
+        Colour::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+    }
+}
+
 /// Quote `value` as one word for `/bin/sh`.
 pub fn shell_quote(value: &str) -> String {
     if !value.is_empty()
@@ -157,6 +217,31 @@ mod tests {
         );
         assert_eq!(shell_quote("a b'c"), r"'a b'\''c'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn spans_become_style_directives() {
+        let span = |text: &str, style: &str| Span {
+            text: text.to_owned(),
+            style: Style::parse(style).unwrap(),
+        };
+        let spans = [
+            span("? 2", "bold yellow"),
+            span(" · ", ""),
+            span("#1", "bg:bright-blue #ff8800 dim"),
+            span("", "208 underline"),
+        ];
+        assert_eq!(
+            markup(&spans),
+            "#[default,fg=yellow,bold]? 2#[default] · #[default,fg=#ff8800,bg=brightblue,dim]##1#[default]"
+        );
+        assert_eq!(markup(&[span("plain", "")]), "plain");
+        assert_eq!(markup(&[]), "");
+        assert_eq!(colour_name(Colour::Indexed(208)), "colour208");
+        assert_eq!(
+            style_words(&Style::parse("italic underline reversed").unwrap()),
+            ["italics", "underscore", "reverse"]
+        );
     }
 
     #[test]

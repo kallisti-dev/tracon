@@ -93,12 +93,18 @@ impl<'de> Deserialize<'de> for Status {
 /// | `ready`, outcome `interrupted` | | `idle.interrupted` |
 /// | `ready`, outcome `finished`, not seen since | | `done` |
 /// | `ready` otherwise | | `idle` |
+/// | none, with a harness | | `unknown` |
 ///
 /// Background tasks and pins modify a status rather than make one. A record
-/// with no state has no status; the list gives a harness no hook has
-/// reported `unknown`.
+/// with no state has a status only when a harness runs in the pane with
+/// nothing reported, which the list notes on the record before asking.
 pub fn status(record: &Record, sighting: Option<Sighting>) -> Option<Status> {
-    let state = record.state.as_ref()?;
+    let Some(state) = record.state.as_ref() else {
+        return record
+            .harness
+            .as_ref()
+            .map(|_| Status::known(Status::UNKNOWN));
+    };
     let waiting = state.is_under(&State::known(State::WAITING));
     let working = *state == State::known(State::WORKING);
     let status = match sighting {
@@ -286,6 +292,11 @@ mod tests {
         };
         assert_eq!(of(&background), "done");
         assert_eq!(status(&Record::default(), None), None);
+        let silent = Record {
+            harness: Some("claude".into()),
+            ..Record::default()
+        };
+        assert_eq!(of(&silent), "unknown");
     }
 
     #[test]

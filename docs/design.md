@@ -7,7 +7,7 @@ the picker and every other front end are clients of it.
 | Surface | Commands | Role |
 | --- | --- | --- |
 | Ingest | `tracon hook <harness>` | Harness adapters turn hook payloads into state changes |
-| Query | `tracon list [--json]`, the event socket | The ordered list with each pane's state, and every change as it happens |
+| Query | `tracon list [--json]`, `tracon summary`, the event socket | The ordered list with each pane's state, its groups counted, and every change as it happens |
 | Command | `tracon focus`, `next`, `pin`, `unpin`, `seen` | Act on panes through a backend |
 
 The library (`src/lib.rs`) holds the state model, the daemon with its store
@@ -75,15 +75,17 @@ Seen means `viewed` is at or after `since`. `error` ignores it, so a failed
 turn stays visible until the next prompt. Background tasks and pins modify
 a status rather than make one: a row reads "done · 2 in background", and
 `@tracon-order` names `background` and `pinned` alongside statuses.
-`unknown` is derived for a pane with no state whose foreground command is a
-known harness, such as `claude` or Nix's `.claude-wrapped`.
+`unknown` is the status of a pane with no state whose foreground command is a
+known harness, such as `claude` or Nix's `.claude-wrapped`: the list notes
+the harness on the record, and the status function reads it.
 
 **Label** is how a status is shown (`src/label.rs`, `src/format.rs`): a
 label, an icon and a style per status, looked up along the tree so that an
 entry for `waiting` covers both waits, and a format string that composes a
 row from them and the pane's other variables. `list --json` carries all
 three layers. The [README](../README.md#configuration) describes the
-options.
+options, and the [configuration file](#configuration) can replace the
+status function and the tables with functions of its own.
 
 State is keyed by pane, never by the harness's session id, because `/clear`
 and `--resume` change the session id inside one pane. The session id is kept
@@ -303,7 +305,40 @@ first: a group sorts this way when its rule lies within one of these. The
 default is `working idle unknown`, so the attention groups stay queues while
 a pane you just saw stays easy to find; `@tracon-recent-first` replaces it.
 The focus hook records the time in `@tracon_viewed`, since tmux keeps no
-per-pane focus time. Every tunable is in `Config` (`src/config.rs`).
+per-pane focus time.
+
+## Summary
+
+`tracon summary` is the list reduced to counts, for a status line
+(`src/summary.rs`). The daemon counts the entries under the first status in
+the order that covers theirs, in the order's order, then any status the
+order doesn't name under its own name; `pinned` and `background` are
+modifiers and make no group. Each group carries its status's label, icon
+and style like a row, and the client renders it through
+`@tracon-summary-format`, joined by `@tracon-summary-separator`, as a tmux
+format with style directives (`tmux::markup`), as plain text or as JSON.
+
+## Configuration
+
+Every tunable is in `Config` (`src/config.rs`), built for each request in
+three layers: the defaults, what the configuration file set up, and the
+tmux options of the client's own server over both, so the file is one
+setting for every server and an option can still differ in one.
+
+The file is Lua, `$XDG_CONFIG_HOME/tracon/init.lua` (`src/script.rs`), run
+by the daemon when it starts and on `tracon reload`, in a fresh state each
+time; a hook never runs it, so it can't slow a tool call. `require("tracon")`
+gives the module in `src/script/tracon.lua`, whose `setup` checks the keys
+and types it is given, so that a mistake is reported with the file and
+line, and hands the values to the daemon to parse as it parses the options.
+Besides the settings, `setup` takes the status function and label
+functions, which `Config` holds behind the `Functions` trait and asks
+before the built-in function and the tables. The pane a status function
+sees is the record with `seen` and `sighting` added. A function that fails,
+or returns a status that doesn't parse, is logged once per distinct failure
+and reported by the check, and the built-in answer stands in. The file runs
+on Lua 5.4 built into the binary, with the standard libraries and its own
+directory on the module path.
 
 ## Focus
 
@@ -353,12 +388,13 @@ without starting a daemon.
 | `src/state.rs` | States, outcomes and records |
 | `src/status.rs` | The status function, rules and ordering |
 | `src/label.rs`, `src/format.rs` | Labels, icons and styles per status, and the format strings that render rows |
+| `src/config.rs`, `src/script.rs`, `src/script/tracon.lua` | The tunables in their three layers, and the Lua configuration file with the module it requires |
 | `src/store/` | Guarded changes and the in-memory store |
 | `src/daemon.rs`, `src/protocol.rs`, `src/journal.rs`, `src/runtime.rs` | The daemon, its messages, its journal and its directory |
 | `src/client.rs` | The client every command uses, which starts the daemon on demand |
 | `src/harness/` | The `Harness` trait and the Claude Code adapter |
 | `src/backend/` | The `Backend` trait, locators and the tmux backend, with setup and the mirror |
-| `src/list.rs` | The ordered list front ends show |
+| `src/list.rs`, `src/summary.rs` | The ordered list front ends show, and its groups counted |
 | `src/cli.rs`, `src/ui.rs`, `src/check.rs` | The command line, the picker and the check |
 | `tracon.tmux` | The tmux plugin's entry point |
 | `.claude-plugin/plugin.json`, `hooks/hooks.json`, `hooks/register.ts` | The Claude Code plugin: its settings hooks and its hooks module |

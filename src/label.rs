@@ -95,6 +95,11 @@ impl Table {
         Ok(self)
     }
 
+    /// Add or replace the entry for `status`.
+    pub fn set(&mut self, status: Status, text: impl Into<String>) {
+        self.0.insert(status, text.into());
+    }
+
     /// The entry for `status`, or for the nearest status above it.
     pub fn get(&self, status: &Status) -> Option<&str> {
         let mut status = Some(status.clone());

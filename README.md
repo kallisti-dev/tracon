@@ -124,13 +124,28 @@ front ends:
 
 ```sh
 tracon list [--json]        # the ordered list
+tracon summary [--plain]    # how many panes are in each group of the list
 tracon next                 # focus the top of the list, skipping the current pane
 tracon focus %3             # focus a pane on the most recently active client
 tracon pin [%3]             # pin a pane, the current one by default
 tracon unpin [%3]
+tracon reload               # run the configuration file again
 ```
 
 `tracon` here is the binary recorded in the tmux option `@tracon-bin`.
+
+`tracon summary` is for a status line: it counts the panes in each group
+of the list and writes them as a tmux format with styles, such as `? 2 ·
+✓ 1` for two panes waiting and one done, or nothing when no pane runs an
+agent. tmux runs the command every `status-interval` seconds:
+
+```tmux
+set -g status-right '#(#{@tracon-bin} summary)'
+set -g status-interval 5
+```
+
+`--plain` drops the styles, for other status lines, and `--json` gives
+the groups with their counts.
 
 Every command talks to a daemon that starts on demand and keeps running
 until `tracon daemon --stop`, or until a reload of the tmux configuration
@@ -157,6 +172,8 @@ before `programs.tmux.extraConfig`.
 | `@tracon-icons` | `waiting=?,error=!,done=✓,working=◐,idle=○,unknown=·` | Icons per status |
 | `@tracon-styles` | `waiting=bold yellow,error=bold red,done=green,working=blue,idle=dim,unknown=dim` | Styles per status |
 | `@tracon-format` | see below | The row format for the picker and `tracon list` |
+| `@tracon-summary-format` | `[{icon} {count}]({style})` | The format of one group in `tracon summary` |
+| `@tracon-summary-separator` | ` · ` | What `tracon summary` puts between groups |
 
 Each preview refresh runs `tmux capture-pane` once. On a slow machine, a
 longer interval such as `500` makes the picker lighter at the cost of a
@@ -205,6 +222,78 @@ The variables are `icon`, `label`, `status` and `style`; `state`, `outcome`
 and `background`, as the hooks recorded them; `age`, the time in the
 state; `location`, `harness`, `title` and `message`; and `pin`, `*` when
 the pane is pinned.
+
+`@tracon-summary-format` composes one group of the summary the same way,
+from `count`, `status`, `label`, `icon` and `style`, where the status is
+the group's. A pane counts under the first status in `@tracon-order` that
+covers its own, so the default order has one group for both waits; a
+status the order doesn't name counts under its own name. For words rather
+than icons:
+
+```tmux
+set -g @tracon-summary-format '{count} {label}'
+set -g @tracon-summary-separator ', '
+```
+
+### Configuration file
+
+For more than the options give, tracon runs `~/.config/tracon/init.lua`,
+or `$XDG_CONFIG_HOME/tracon/init.lua`, when its daemon starts, and again
+on `tracon reload`. The file calls `setup` on the `tracon` module with the
+same settings as the options:
+
+```lua
+local tracon = require("tracon")
+
+tracon.setup({
+  order = "waiting pinned error done working idle unknown",
+  recent_first = { "working", "idle", "unknown" },
+  preview_interval = 100,
+  format = "{icon} {label:<16} {location}",
+  labels = { ["waiting.permission"] = "approve?" },
+  icons = { waiting = "!" },
+  styles = { done = "bold green" },
+  summary = { format = "{count} {label}", separator = ", " },
+})
+```
+
+`order` and `recent_first` take a string or a list of names, and
+`preview_interval` milliseconds. The tables add to the defaults entry by
+entry, as the options do, and the tmux options apply over whatever the
+file sets, so one server can still differ.
+
+The file can also replace the functions behind the settings. `status` is
+the function from a pane to its status, and `labels`, `icons` and
+`styles` may be functions from a status to its text instead of tables. The
+pane is a table with the recorded `state`, `outcome`, `background`,
+`since`, `viewed`, `message`, `harness`, `session`, `agent` and `pinned`,
+plus `seen`, whether the pane was focused since its state last changed,
+and `sighting`, what the screen reader saw, when it looked.
+`tracon.status(pane)` is the built-in function, and `tracon.label(status)`,
+`tracon.icon(status)` and `tracon.style(status)` read the built-in
+tables, for the cases a function leaves to them; a label, icon or style
+function that returns `nil` leaves the lookup to the tables. A status can
+be new, like `working.shell` here, and the rules, labels and styles of the
+status above it cover it:
+
+```lua
+tracon.setup({
+  status = function(pane)
+    if pane.state == "working" and (pane.message or ""):sub(1, 1) == "!" then
+      return "working.shell"
+    end
+    return tracon.status(pane)
+  end,
+  labels = { ["working.shell"] = "in a shell" },
+})
+```
+
+A mistake in the file is reported with its line by `tracon reload` and by
+the check, and leaves tracon on its defaults; a function that fails is
+reported the same way, and the built-in one answers in its place. The
+file's directory is on the module path, so `require("mine")` loads
+`~/.config/tracon/mine.lua`. The file runs in the daemon, never in a hook,
+so it can't slow Claude Code down.
 
 ## Development
 
