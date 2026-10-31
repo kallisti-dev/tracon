@@ -292,6 +292,29 @@ impl Server {
         );
     }
 
+    /// Wait for the pane's screen to pass `check`, and return it. A timeout
+    /// shows the last screen, and whether the pane's command has exited.
+    fn screen_becomes(&self, what: &str, pane: &str, check: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let screen = self.tmux(&["capture-pane", "-p", "-t", pane]);
+            if check(&screen) {
+                return screen;
+            }
+            if Instant::now() >= deadline {
+                let dead = self.tmux(&[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    pane,
+                    "dead=#{pane_dead} status=#{pane_dead_status}",
+                ]);
+                panic!("timed out waiting until {what} ({dead}); the screen shows:\n{screen}");
+            }
+            sleep(Duration::from_millis(25));
+        }
+    }
+
     /// Give `pane` a record before the daemon starts, through its journal.
     fn seed(&self, pane: &str, mut record: Value, since: u64) {
         assert!(
@@ -1039,6 +1062,8 @@ fn groups_command<'a>(hooks: &'a Value, event: &str) -> &'a str {
 fn the_picker_lists_previews_and_focuses() {
     let mut server = Server::start();
     let agent = server.new_session("agents");
+    // The filter matches the title too, which is the host's name until set.
+    server.tmux(&["select-pane", "-T", "agent", "-t", &agent]);
     server.tmux(&["send-keys", "-t", &agent, "echo preview-marker", "Enter"]);
     server.hook(&agent, event("PermissionRequest", bash(None)));
     let client = server.attach("work");
@@ -1050,9 +1075,8 @@ fn the_picker_lists_previews_and_focuses() {
         &picker,
         &format!("TRACON_CLIENT={client} {} pick", server.binary().display()),
     ]);
-    let screen = wait_until("the picker draws", Duration::from_secs(10), || {
-        let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
-        (screen.contains("? needs approval") && screen.contains("preview-marker")).then_some(screen)
+    let screen = server.screen_becomes("the picker draws", &picker, |screen| {
+        screen.contains("? needs approval") && screen.contains("preview-marker")
     });
     assert!(screen.contains("agents:0.0"), "{screen}");
 
@@ -1061,19 +1085,13 @@ fn the_picker_lists_previews_and_focuses() {
         (server.option(&agent, "@tracon_pinned") == "1").then_some(())
     });
     server.tmux(&["send-keys", "-t", &picker, "/nomatch"]);
-    wait_until("the filter hides the pane", Duration::from_secs(10), || {
-        let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
-        (screen.contains("/nomatch") && !screen.contains("agents:0.0")).then_some(())
+    server.screen_becomes("the filter hides the pane", &picker, |screen| {
+        screen.contains("/nomatch") && !screen.contains("agents:0.0")
     });
     server.tmux(&["send-keys", "-t", &picker, "Escape"]);
-    wait_until(
-        "clearing the filter shows it",
-        Duration::from_secs(10),
-        || {
-            let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
-            screen.contains("agents:0.0").then_some(())
-        },
-    );
+    server.screen_becomes("clearing the filter shows it", &picker, |screen| {
+        screen.contains("agents:0.0")
+    });
     server.tmux(&["send-keys", "-t", &picker, "Enter"]);
     wait_until("the client moves", Duration::from_secs(10), || {
         (server.shows(&client) == format!("agents {agent}")).then_some(())
@@ -1096,9 +1114,8 @@ fn the_picker_fits_a_short_pane() {
         "#{pane_id}",
         &format!("{} pick", server.binary().display()),
     ]);
-    wait_until("the picker draws", Duration::from_secs(10), || {
-        let screen = server.tmux(&["capture-pane", "-p", "-t", &picker]);
-        screen.contains("needs approval").then_some(())
+    server.screen_becomes("the picker draws", &picker, |screen| {
+        screen.contains("needs approval")
     });
 }
 
